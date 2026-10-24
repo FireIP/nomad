@@ -9,17 +9,16 @@
 
 ## Setup scripts
 
-- [ ] Package install and group setup (Phase 1.1)
-- [ ] SSH key exchange check (Phase 1.2)
-- [ ] `default` network check and subnet match (Phase 1.3)
-- [ ] `qemu:///system` default URI check (Phase 1.4)
-- [ ] CPU baseline generation and `cpu-compare` verification (Phase 2)
-- [ ] NFS export on the NUC and guest mount (Phase 3)
-- [ ] VM creation and baseline CPU swap (Phase 4)
-- [ ] Live migration wrapper (Phase 7)
-- [ ] Make all scripts idempotent and safe to run on either host
+- [x] Scripts written in `scripts/` for Phases 1, 2, 3 (optional), 4 and 7
+- [x] Tested on both hosts: `00-preflight.sh <peer>`, `03-cpu-baseline.sh extract|baseline|verify`, `migrate.sh <peer> --dry-run`
+- [ ] Test `02-network.sh [peer]` on both hosts
+- [ ] Test a real `migrate.sh <peer>` in both directions
+- [x] Update guide Phase 2.4 to use `hypervisor-cpu-compare` (plain `cpu-compare` gave a false "incompatible")
+- [ ] (only if NFS gets set up) Set up NFS with `04-nfs.sh server`, test it, then add the `/mnt/bulk` mount in the guest
+- [ ] Decide whether to drop `collect-migration-info.sh` now that debugging is done
+- [ ] (low priority) Test `01-install.sh` on a host (safe to re-run; check it doesn't repeat group or `~/.bashrc` changes)
+- [ ] (low priority) Test `05-create-vm.sh create` and `apply-baseline` with a throwaway domain (`DOMAIN=nomad-test IMG=/var/lib/libvirt/images/nomad-test.qcow2`), then remove it with `virsh undefine nomad-test --nvram`
 
 ## Guide
 
 - [ ] Keep `nuc-laptop-vm-handoff-guide_v2.md` in sync with the scripts
-- [ ] Mark Phase 7 as unverified until migration works
