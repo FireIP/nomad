@@ -20,6 +20,22 @@ Read this before you start, so nothing here is a surprise mid-build:
 
 ---
 
+## Setup scripts
+
+The `scripts/` directory automates most of the steps below. They are idempotent and safe to run on either host, but have not been run end to end yet; the manual commands in each phase remain the reference.
+
+| Script | Phase | Run on |
+|---|---|---|
+| `01-install.sh` | 1.1, 1.4 | both |
+| `02-network.sh [peer]` | 1.2, 1.3 | both |
+| `00-preflight.sh [peer]` | checks | both (compares hosts when given a peer) |
+| `03-cpu-baseline.sh extract\|baseline\|verify` | 2 | extract and verify on both, baseline on one |
+| `04-nfs.sh server\|fstab` | 3 (optional) | NUC |
+| `05-create-vm.sh create\|apply-baseline` | 4 | one host |
+| `migrate.sh <peer>` | 7 | the host currently running the VM |
+
+---
+
 ## Phase 0 — Before you start
 
 **Confirmed RAM:** laptop has 24GB installed, NUC has 64GB. That resolves the ambiguity in the S938's published specs (sources disagreed anywhere from 16GB to 20GB) — good that this got checked against the real machine rather than a spec sheet. 24GB gives comfortable room to size the VM's baseline memory well below it while still leaving plenty for the laptop's own desktop environment — see Phase 4.
@@ -169,15 +185,14 @@ virsh hypervisor-cpu-baseline both-cpus.xml --migratable > baseline-cpu.xml
 ### 2.4 Verify it — don't just trust the math
 
 ```bash
-# On the NUC:
-virsh cpu-compare baseline-cpu.xml
-
-# On the laptop:
-virsh cpu-compare baseline-cpu.xml
-# (or hypervisor-cpu-compare, depending on libvirt version)
+# On both the NUC and the laptop:
+virsh hypervisor-cpu-compare baseline-cpu.xml --virttype kvm --arch x86_64 --machine q35
+# older libvirt without this command: virsh cpu-compare baseline-cpu.xml
 ```
 
 Both should report the definition as identical to, or a safe subset of, what that host can provide. Don't proceed to Phase 4 until both pass.
+
+Prefer `hypervisor-cpu-compare`: it asks QEMU/KVM what it can really provide. Plain `cpu-compare` only checks libvirt's static host CPU description and can wrongly report this baseline as incompatible, even though the VM runs with it. (`scripts/03-cpu-baseline.sh verify` does the right one automatically.)
 
 ### 2.5 Your computed baseline (validated)
 
@@ -296,7 +311,7 @@ Save this as `baseline-cpu.xml` — it goes straight into the domain XML in Phas
 </cpu>
 ```
 
-Still run the actual `cpu-compare` check from 2.4 on both real machines before trusting this in production — the analysis above is a strong signal, not a substitute for the tool confirming it against your actual hardware.
+Still run the actual `hypervisor-cpu-compare` check from 2.4 on both real machines before trusting this in production — the analysis above is a strong signal, not a substitute for the tool confirming it against your actual hardware.
 
 ---
 
@@ -491,7 +506,7 @@ If plain virtio-gpu feels sluggish and it bothers you enough to troubleshoot dri
 ## Quick troubleshooting checklist
 
 - **`virsh` permission denied despite `libvirt` group membership** → check polkit rules for your distro, don't just reach for `sudo`.
-- **Migration fails on CPU compatibility** → re-run `virsh cpu-compare` on both hosts; something in Phase 2 wasn't verified.
+- **Migration fails on CPU compatibility** → re-run `virsh hypervisor-cpu-compare` (see 2.4) on both hosts; something in Phase 2 wasn't verified.
 - **Guest hangs when `/mnt/bulk` is unreachable** → double-check the `soft,nofail` mount options actually made it into `/etc/fstab`.
 - **vCPUs don't come online after `setvcpus`** → check `dmesg` in the guest for hotplug-related messages; some minimal/hardened images need an explicit udev rule to auto-online new CPUs.
 - **Live migration fails with `error while loading state for instance 0x0 of device 'ram' ... ret: -22`** → this is a generic wrapper. Read `/var/log/libvirt/qemu/nomad.log` on the *destination* for the real cause. Known one: `Size mismatch: ...virtio-net-pci.rom` — add `<rom bar='off'/>` to the NIC (Phase 4), with the guest shut down, on whichever host defines the domain. Matching QEMU versions and machine types alone did not fix it.
