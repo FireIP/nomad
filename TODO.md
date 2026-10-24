@@ -2,13 +2,10 @@
 
 ## Blocking
 
-- [ ] **Fix live migration** — `virsh migrate --live --persistent --undefinesource --copy-storage-all nomad qemu+ssh://you@<host>/system` currently fails.
-  - [ ] Capture the exact error output and which direction fails (NUC → laptop, laptop → NUC, or both)
-  - [ ] Re-run `virsh cpu-compare baseline-cpu.xml` on both hosts
-  - [ ] Confirm `virsh uri` prints `qemu:///system` on both hosts
-  - [ ] Confirm a cold migration round trip works (Phase 6)
-  - [ ] Check the stale destination qcow2 case (Phase 7 note)
-  - [ ] Update the guide with the root cause and fix
+- [x] **Fix live migration** — fixed. Causes: virtio-net option ROM size mismatch between hosts (`<rom bar='off'/>` on the NIC) and AppArmor missing on one host. Verified in both directions.
+- [ ] **Investigate slow migrations** — both directions took very long. Measure where time goes (full 60GB qcow2 copy vs. RAM), check disk usage and network throughput, consider `--compressed` or a smaller disk.
+- [ ] Verify guest clocksource is `kvm-clock` and time stays correct after migration (TSC scaling warning on the laptop)
+- [ ] Re-test the stale destination qcow2 case (Phase 7 note)
 
 ## Setup scripts
 

@@ -344,7 +344,7 @@ virt-install \
   --boot uefi \
   --disk path=/var/lib/libvirt/images/nomad.qcow2,bus=scsi,discard=unmap \
   --controller type=scsi,model=virtio-scsi \
-  --network network=default,model=virtio \
+  --network network=default,model=virtio,rom.bar=off \
   --graphics spice \
   --video virtio \
   --channel unix,target_type=virtio,name=org.qemu.guest_agent.0 \
@@ -355,7 +355,8 @@ virt-install \
 Notes:
 - `--memory 12288` (12GiB) is comfortably sized against the laptop's confirmed 24GB — leaves plenty for its own desktop environment and QEMU's overhead alongside the guest. You'll be able to use much more while docked at the NUC via ballooning (Phase 8).
 - `--vcpus 6` leaves the laptop's 8 logical threads some headroom for its own OS. You'll get more out of the NUC via hotplug (Phase 8).
-- `--network network=default,model=virtio` attaches to the NAT network from Phase 1.3 — remember to set the guest's static IP once it's installed (also Phase 1.3) so its network identity stays identical regardless of which host it's running on.
+- `--network network=default,model=virtio,rom.bar=off` attaches to the NAT network from Phase 1.3 — remember to set the guest's static IP once it's installed (also Phase 1.3) so its network identity stays identical regardless of which host it's running on.
+- `rom.bar=off` (`<rom bar='off'/>` in the XML) is required for live migration. The virtio-net option ROM is migrated as a RAM block, and distros ship it in different sizes (e.g. 512 KB on Ubuntu, 256 KB on Kali), which makes the destination fail with `Size mismatch: ...virtio-net-pci.rom` and a generic `error while loading state for instance 0x0 of device 'ram'`. The guest never PXE-boots, so nothing is lost.
 - `--cpu host-model` here is just a placeholder to get through the install — swapped out for the real baseline (2.5) right after.
 - If `--os-variant detect=on,require=on` fails to identify your install media, pass the variant explicitly instead (e.g. `--os-variant ubuntu24.04`).
 
@@ -424,6 +425,8 @@ virsh migrate --live --persistent --undefinesource --copy-storage-all \
   nomad qemu+ssh://you@nuc.local/system
 ```
 
+Both directions have been verified working (NUC → laptop and laptop → NUC), but each took a long time, since the whole disk is copied every time. Requirements for it to work: `rom.bar=off` on the NIC (Phase 4) and matching QEMU/machine type.
+
 `--persistent` writes the domain config on the destination; `--undefinesource` removes it from wherever it just left, so the VM's definition always lives wherever the VM currently is.
 
 **One thing to specifically test on your third migration** (the first "back home" leg): `--undefinesource` removes the libvirt *config* from the source, not the leftover disk file sitting in `/var/lib/libvirt/images/`. Whether `--copy-storage-all` cleanly overwrites that stale file or errors against it isn't something to assume — watch it happen once, and clean up manually if needed.
@@ -491,5 +494,8 @@ If plain virtio-gpu feels sluggish and it bothers you enough to troubleshoot dri
 - **Migration fails on CPU compatibility** → re-run `virsh cpu-compare` on both hosts; something in Phase 2 wasn't verified.
 - **Guest hangs when `/mnt/bulk` is unreachable** → double-check the `soft,nofail` mount options actually made it into `/etc/fstab`.
 - **vCPUs don't come online after `setvcpus`** → check `dmesg` in the guest for hotplug-related messages; some minimal/hardened images need an explicit udev rule to auto-online new CPUs.
+- **Live migration fails with `error while loading state for instance 0x0 of device 'ram' ... ret: -22`** → this is a generic wrapper. Read `/var/log/libvirt/qemu/nomad.log` on the *destination* for the real cause. Known one: `Size mismatch: ...virtio-net-pci.rom` — add `<rom bar='off'/>` to the NIC (Phase 4), with the guest shut down, on whichever host defines the domain. Matching QEMU versions and machine types alone did not fix it.
+- **`Security driver model 'apparmor' is not available`** → see `FIX-apparmor-migration.md`.
+- **`TSC frequency mismatch ... TSC scaling unavailable` in the log** → expected when migrating to the laptop; the baseline drops `invtsc` so the guest uses `kvm-clock`. Verify with `cat /sys/devices/system/clocksource/clocksource0/current_clocksource` in the guest.
 - **Second live migration onward fails or behaves oddly with the disk** → this is the stale-file scenario from Phase 7 — check what's actually sitting at the destination path before assuming.
 - **`virsh` commands don't show the VM or network you expect** → check `virsh uri`. If it prints `qemu:///session` instead of `qemu:///system`, you're quietly talking to the wrong libvirt instance — see Phase 1.4.

@@ -4,7 +4,7 @@ This repo is not a software project: there is no build, test, or lint tooling. I
 
 ## Project status
 
-- **Live migration currently fails.** The guide's Phase 7 procedure is not yet working end to end, so don't present it as verified. When debugging, work back through the earlier checks (Phase 2 `cpu-compare` on both hosts, Phase 1.4 `virsh uri`, Phase 6 cold migration round trip) and ask for the actual `virsh migrate` error output rather than guessing.
+- **Live migration works in both directions, but is slow.** It was fixed by `<rom bar='off'/>` on the NIC (the virtio-net option ROM differs in size between the hosts) and by having AppArmor on both hosts (see `FIX-apparmor-migration.md`). The generic `ram ... ret: -22` error hides the real cause, so read `/var/log/libvirt/qemu/nomad.log` on the destination. `scripts/collect-migration-info.sh` gathers the comparison data from a host. Slow handoffs are an open TODO.
 - **Setup scripts are planned but don't exist yet (TODO).** They will automate the guide's setup steps (package install, SSH keys, network check, CPU baseline, VM creation). When adding them, keep them consistent with the guide: change both together, and keep scripts idempotent and safe to run on either host (NUC or laptop).
 
 ## Layout and how the pieces relate
@@ -22,7 +22,7 @@ This repo is not a software project: there is no build, test, or lint tooling. I
 
 - **Migration safety comes from the CPU baseline.** The laptop's older feature set is the ceiling, so never put `host-model` or `host-passthrough` in the final domain XML. If a CPU file changes, regenerate the whole chain above and re-verify with `virsh cpu-compare baseline-cpu.xml` on both hosts. Keep the baseline in the guide (2.5), `baseline-cpu.xml`, and `nomad.xml` in sync.
 - **`qemu:///system` is assumed everywhere.** Every `virsh` example relies on it, and the guide calls out `qemu:///session` as a silent failure mode (Phase 1.4).
-- **Hardware must be identical on both hosts for migration.** The guest uses q35 with UEFI, virtio-scsi disks with `discard=unmap`, virtio net on libvirt's `default` NAT network, virtio-gpu video with no 3D, SPICE graphics, and a qemu-guest-agent channel. The guest has a static IP (`192.168.122.50/24`, gateway `.1`) so it looks the same on either host. Don't add host-specific devices (GPU or USB passthrough, bridges tied to one NIC).
+- **Hardware must be identical on both hosts for migration.** The guest uses q35 with UEFI, virtio-scsi disks with `discard=unmap`, virtio net (with `<rom bar='off'/>`, required because the option ROM size differs per distro) on libvirt's `default` NAT network, virtio-gpu video with no 3D, SPICE graphics, and a qemu-guest-agent channel. The guest has a static IP (`192.168.122.50/24`, gateway `.1`) so it looks the same on either host. Don't add host-specific devices (GPU or USB passthrough, bridges tied to one NIC).
 - **Disk stays lean.** `--copy-storage-all` copies the whole qcow2 on every handoff, so the guide keeps the disk to about 60GB or less and puts bulk data on an NFS export from the NUC. The guest mounts it with `soft,nofail,_netdev`, so it never hangs when the NUC is unreachable.
 - **The daily migration command is `virsh migrate --live --persistent --undefinesource --copy-storage-all nomad qemu+ssh://you@<host>/system`.**
 - **Placeholders stay generic.** The guide uses `you@laptop.local`, `you@nuc.local`, and `/path/to/your-installer.iso`. Keep them rather than inserting real usernames or hosts.
