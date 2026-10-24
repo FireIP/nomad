@@ -240,6 +240,7 @@
       <mac address='52:54:00:a5:39:df'/>
       <source network='default'/>
       <model type='virtio'/>
+      <rom bar='off'/>
       <address type='pci' domain='0x0000' bus='0x01' slot='0x00' function='0x0'/>
     </interface>
     <serial type='pty'>
