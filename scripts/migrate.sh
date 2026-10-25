@@ -9,6 +9,8 @@
 #              3 + image size, QEMU thread states/wchan, migration TCP sockets (to debug stalls)
 # Run it on the host that currently runs the VM. Extra virsh migrate flags: MIGRATE_ARGS="...".
 # --auto-converge is added by default (disable with NO_AUTO_CONVERGE=1).
+# Before migrating it deflates vCPUs/balloon to TARGET_VCPUS (6) / TARGET_MEM_KIB (12 GiB), waiting up to
+# DEFLATE_TIMEOUT (300) seconds; NO_DEFLATE=1 skips that (guide 8.1/8.2).
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 PEER=""
@@ -54,6 +56,24 @@ if ssh -o BatchMode=yes "$PEER" "test -e /var/lib/libvirt/images/$DOMAIN.qcow2";
 fi
 
 [ "$problems" -eq 0 ] || die "pre-checks failed; fix the problems above (nothing was migrated)"
+
+# Guide 8.1/8.2: shrink the guest to the laptop-sized baseline first (the laptop has 24 GB and 4C/8T).
+# The balloon only returns what the guest frees, so wait for it. NO_DEFLATE=1 skips this.
+TARGET_VCPUS="${TARGET_VCPUS:-6}"
+TARGET_MEM_KIB="${TARGET_MEM_KIB:-12582912}"
+DEFLATE_TIMEOUT="${DEFLATE_TIMEOUT:-300}"
+if [ "${NO_DEFLATE:-0}" != 1 ]; then
+  vcpus_now="$(cur_vcpus "$DOMAIN")"; mem_now="$(cur_mem_kib "$DOMAIN")"
+  if [ "$vcpus_now" -gt "$TARGET_VCPUS" ] || [ "$mem_now" -gt "$((TARGET_MEM_KIB + 262144))" ]; then
+    log "Deflating guest before migration: $vcpus_now -> $TARGET_VCPUS vCPUs, $((mem_now / 1024)) -> $((TARGET_MEM_KIB / 1024)) MiB"
+    if [ "$DRY_RUN" -eq 1 ]; then
+      log "Dry run, not deflating"
+    else
+      resize_guest "$DOMAIN" "$TARGET_VCPUS" "$TARGET_MEM_KIB" "$DEFLATE_TIMEOUT" \
+        || die "guest did not deflate; free memory in the guest and retry (nothing was migrated)"
+    fi
+  fi
+fi
 
 # By default QEMU connects to whatever the peer's hostname resolves to, IPv6 first. If the peer's
 # firewall drops IPv6 on the migration ports each attempt waits for the TCP SYN timeout (~9 min in

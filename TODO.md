@@ -31,6 +31,17 @@
 - [ ] (low priority) Test `01-install.sh` on a host (safe to re-run; check it doesn't repeat group or `~/.bashrc` changes)
 - [ ] (low priority) Test `05-create-vm.sh create` and `apply-baseline` with a throwaway domain (`DOMAIN=nomad-test IMG=/var/lib/libvirt/images/nomad-test.qcow2`), then remove it with `virsh undefine nomad-test --nvram`
 
+## Phase 8 (performance, next up)
+
+- [x] 8.1 vCPU hotplug: `<vcpu placement='static' current='6'>16</vcpu>`; `setvcpus nomad 16 --live` / `6 --live` verified, guest udev rule onlines CPUs (guide Phase 5), laptop accepts the 16-vCPU max, `nomad.xml` updated
+- [x] 8.2 Memory ballooning: `<memory>` 33554432 KiB (32 GiB), `<currentMemory>` 12582912 KiB (12 GiB); `setmem` verified, laptop (24 GB) accepts the 32 GiB max, `migrate.sh` deflates first, `nomad.xml` updated
+- [x] `scripts/inflate.sh [inflate|deflate|status]` for easy inflating (untested on the real hosts)
+- [x] Decide whether `migrate.sh` should auto-deflate: done, it deflates to 6 vCPUs / 12 GiB and waits (`NO_DEFLATE=1` skips); `05-create-vm.sh apply-limits` added. Migration to and from the laptop works
+- [x] Re-measure migration time with `--monitor` after 8.2: NUC → laptop 3 min 27 s (+~30 s deflate while playing YouTube), laptop → NUC 3 min 22 s, YouTube kept playing (was 221 s with auto-converge before)
+- [x] Numbers checked (12 GiB/6 vCPU at the laptop, 32 GiB/16 vCPU at the NUC): guide 8.1/8.2, `nomad.xml` and `05-create-vm.sh` agree
+
+- [ ] Multiple monitors for the VM: add a second video head (`<video><model type='virtio' heads='2'/></video>` in `nomad.xml`, same on both hosts) and open it with `remote-viewer` / `virt-viewer --connect qemu:///system nomad` (multi-monitor via SPICE, `spice-vdagent` in the guest). Check it survives migration and that the laptop's own display plus an external monitor work. Update guide Phase 4/8 and `05-create-vm.sh` if it works
+
 ## Guide
 
 - [ ] Keep `nuc-laptop-vm-handoff-guide_v2.md` in sync with the scripts

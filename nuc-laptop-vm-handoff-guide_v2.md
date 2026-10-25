@@ -398,6 +398,14 @@ This gives you clean `virsh shutdown`, IP reporting, and consistent snapshots. V
 virsh domifaddr nomad
 ```
 
+Also in the guest, auto-online hotplugged vCPUs (needed for Phase 8.1; without it `setvcpus` adds CPUs that stay offline):
+```bash
+sudo tee /etc/udev/rules.d/99-cpu-hotplug.rules <<'EOF'
+SUBSYSTEM=="cpu", ACTION=="add", TEST=="online", ATTR{online}=="0", ATTR{online}="1"
+EOF
+sudo udevadm control --reload
+```
+
 Now go back and add the `/mnt/bulk` NFS mount from Phase 3 if you're using it.
 
 ---
@@ -442,7 +450,7 @@ virsh migrate --live --persistent --undefinesource --copy-storage-all --auto-con
 
 Both directions have been verified working (NUC → laptop and laptop → NUC). The whole disk is copied every time.
 
-**Use `--auto-converge`.** On wired Gigabit (~111 MiB/s) the disk phase takes ~2.5 min (12.4 GiB allocated) and is close to the link limit. The RAM phase is the variable part: if the guest dirties memory as fast as the link sends it (measured while playing YouTube: ~117 MiB/s), precopy never converges. That took 453 s and 305 iterations; with `--auto-converge` it took 221 s and 31 iterations, at the price of 10–20 s of guest lag at the very end while vCPUs are throttled (up to 90%). An idle guest is barely affected. `scripts/migrate.sh` adds the flag by default (`NO_AUTO_CONVERGE=1` disables it) and `--monitor` logs the job stats to see where the time goes.
+**Use `--auto-converge`.** On wired Gigabit (~111 MiB/s) the disk phase takes ~2.5 min (12.4 GiB allocated) and is close to the link limit. The RAM phase is the variable part: if the guest dirties memory as fast as the link sends it (measured while playing YouTube: ~117 MiB/s), precopy never converges. That took 453 s and 305 iterations; with `--auto-converge` it took 221 s and 31 iterations, at the price of 10–20 s of guest lag at the very end while vCPUs are throttled (up to 90%). An idle guest is barely affected. `scripts/migrate.sh` adds the flag by default (`NO_AUTO_CONVERGE=1` disables it) and `--monitor` logs the job stats to see where the time goes. With the guest deflated to 12 GiB / 6 vCPUs first (Phase 8), a migration took 3 min 27 s NUC → laptop (plus ~30 s deflate) and 3 min 22 s laptop → NUC, with YouTube playing throughout.
 
 **Pin the data connection to IPv4.** By default QEMU connects to whatever the destination's hostname resolves to, IPv6 first. If the destination's firewall drops IPv6 on the migration ports (49152–49215), each attempt waits for the TCP SYN timeout and the migration stalls for minutes (twice, ~9 min each, laptop → NUC) while `virsh domjobinfo` times out and the guest freezes. Add `--migrateuri tcp://<destination IPv4>`; `scripts/migrate.sh` does this automatically. Requirements for it to work: `rom.bar=off` on the NIC (Phase 4) and matching QEMU/machine type.
 
@@ -481,7 +489,11 @@ virsh setvcpus nomad 16 --live    # once docked at the NUC
 virsh setvcpus nomad 6 --live     # before/after heading to the laptop
 ```
 
-Verify inside the guest with `lscpu | grep "^CPU(s):"` — mainstream systemd distros auto-online hotplugged vCPUs, but confirm it rather than assume.
+Verify inside the guest with `lscpu | grep "^CPU(s):"` and the online list (`lscpu | grep -i online`). Hotplugged CPUs are *not* onlined by default on every distro: without the udev rule from Phase 5 they show up under "Offline CPU(s)". Verified: with the rule, both `setvcpus nomad 16 --live` and `setvcpus nomad 6 --live` work without manual steps.
+
+For a new VM, `scripts/05-create-vm.sh apply-limits` (guest shut down) sets the max/current values of this section and 8.2 in one go.
+
+**Before migrating to the laptop, drop back to 6 vCPUs** (the laptop is 4C/8T). `scripts/migrate.sh` does this for you (see 8.2).
 
 ### 8.2 Memory ballooning
 
@@ -490,16 +502,20 @@ Similarly, let the NUC's much larger RAM actually get used:
 virsh edit nomad
 ```
 ```xml
-<memory unit='KiB'>41943040</memory>        <!-- 40 GiB max -->
+<memory unit='KiB'>33554432</memory>        <!-- 32 GiB max -->
 <currentMemory unit='KiB'>12582912</currentMemory>   <!-- 12 GiB active, matches Phase 4 -->
 ```
 
 ```bash
-virsh setmem nomad 40G --live     # inflate while at the NUC — confirmed 64GB installed, leaves plenty for the host
+virsh setmem nomad 32G --live     # inflate while at the NUC — confirmed 64GB installed, leaves plenty for the host
 virsh setmem nomad 12G --live     # deflate with some idle buffer before migrating to the laptop
 ```
 
-Caveat: the balloon can only reclaim memory the guest voluntarily releases. Deflate with a few minutes of breathing room before a migration, not seconds before, and expect it to behave worse if you deflate right after heavy memory use.
+Caveat: the balloon can only reclaim memory the guest voluntarily releases. Deflate with a few minutes of breathing room before a migration, not seconds before, and expect it to behave worse if you deflate right after heavy memory use. Check progress with `virsh dommemstat nomad` (`actual` is the current balloon size).
+
+**Easy mode: `scripts/inflate.sh`.** At the NUC run `scripts/inflate.sh` to grow the running guest to its maximums (16 vCPUs, 32 GiB), `scripts/inflate.sh deflate` to shrink it back to 6 vCPUs / 12 GiB, and `scripts/inflate.sh status` to see the current/max sizes. Inflate waits until the guest follows, and refuses if the host has too few CPU threads or free RAM (4 GiB stays reserved for the host, `RESERVE_KIB`), so running it on the laptop is harmless. `INFLATE_VCPUS` / `INFLATE_MEM_KIB` choose a smaller size.
+
+**`scripts/migrate.sh` deflates automatically.** If the guest has more than 6 vCPUs or a balloon above 12 GiB, it runs `setvcpus 6` and `setmem 12582912KiB`, waits up to 300 s (`DEFLATE_TIMEOUT`), and aborts before migrating if the targets aren't reached. Skip it with `NO_DEFLATE=1`; change targets with `TARGET_VCPUS` / `TARGET_MEM_KIB`. After arriving at the NUC, inflate manually with the commands above. Never migrate while inflated: the laptop only has 24 GB.
 
 ### 8.3 (Optional, fiddlier) 3D-accelerated graphics
 
@@ -512,7 +528,7 @@ If plain virtio-gpu feels sluggish and it bothers you enough to troubleshoot dri
 - **`virsh` permission denied despite `libvirt` group membership** → check polkit rules for your distro, don't just reach for `sudo`.
 - **Migration fails on CPU compatibility** → re-run `virsh hypervisor-cpu-compare` (see 2.4) on both hosts; something in Phase 2 wasn't verified.
 - **Guest hangs when `/mnt/bulk` is unreachable** → double-check the `soft,nofail` mount options actually made it into `/etc/fstab`.
-- **vCPUs don't come online after `setvcpus`** → check `dmesg` in the guest for hotplug-related messages; some minimal/hardened images need an explicit udev rule to auto-online new CPUs.
+- **vCPUs don't come online after `setvcpus`** (`lscpu` lists them under "Offline CPU(s)") → add the udev rule from Phase 5. Right away: `echo 1 | sudo tee /sys/devices/system/cpu/cpuN/online` per CPU. Otherwise check `dmesg` in the guest for hotplug-related messages.
 - **Live migration fails with `error while loading state for instance 0x0 of device 'ram' ... ret: -22`** → this is a generic wrapper. Read `/var/log/libvirt/qemu/nomad.log` on the *destination* for the real cause. Known one: `Size mismatch: ...virtio-net-pci.rom` — add `<rom bar='off'/>` to the NIC (Phase 4), with the guest shut down, on whichever host defines the domain. Matching QEMU versions and machine types alone did not fix it.
 - **`Security driver model 'apparmor' is not available`** → see `FIX-apparmor-migration.md`.
 - **`TSC frequency mismatch ... TSC scaling unavailable` in the log** → expected when migrating to the laptop; the baseline drops `invtsc` so the guest uses `kvm-clock`. Verify with `cat /sys/devices/system/clocksource/clocksource0/current_clocksource` in the guest.

@@ -52,3 +52,24 @@ facts() {
 remote_facts() {
   { declare -f facts; echo facts; } | ssh -o BatchMode=yes "$1" bash -s
 }
+
+# Guest resize helpers (guide 8.1/8.2). Memory values are KiB.
+cur_vcpus()    { virsh vcpucount "$1" --live --current; }
+max_vcpus()    { virsh vcpucount "$1" --live --maximum; }
+cur_mem_kib()  { virsh dommemstat "$1" | awk '$1=="actual"{print $2}'; }
+max_mem_kib()  { virsh dominfo "$1" | awk '/^Max memory:/{print $3}'; }
+
+# resize_guest <domain> <vcpus> <mem_kib> <timeout_s>: set both live and wait until the guest follows
+# (the balloon only returns memory the guest frees, so shrinking can take minutes). Returns 1 on timeout.
+resize_guest() {
+  local dom="$1" vcpus="$2" mem="$3" timeout="$4" slack=262144 i
+  [ "$(cur_vcpus "$dom")" = "$vcpus" ] || virsh setvcpus "$dom" "$vcpus" --live
+  [ "$(cur_mem_kib "$dom")" -eq "$mem" ] || virsh setmem "$dom" "${mem}KiB" --live
+  for ((i = 0; i < timeout; i += 2)); do
+    [ "$(cur_vcpus "$dom")" = "$vcpus" ] && [ "$(cur_mem_kib "$dom")" -ge "$((mem - slack))" ] \
+      && [ "$(cur_mem_kib "$dom")" -le "$((mem + slack))" ] && return 0
+    sleep 2
+  done
+  warn "after ${timeout}s: $(cur_vcpus "$dom") vCPUs, $(($(cur_mem_kib "$dom") / 1024)) MiB (wanted $vcpus, $((mem / 1024)) MiB)"
+  return 1
+}
