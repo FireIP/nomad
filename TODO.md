@@ -6,7 +6,7 @@
 - [x] **Slow laptop → NUC migration (20 min vs 3–5 min the other way)** — fixed: QEMU tried the NUC's IPv6 addresses first and each attempt waited for the TCP SYN timeout (two ~9 min stalls). `migrate.sh` now pins `--migrateuri tcp://<peer IPv4>`. Verified.
 - [ ] **Slow migrations (busy guest)** — cause found: with a busy guest (YouTube) the RAM dirty rate (~117 MiB/s) matched the Gigabit link (~111 MiB/s), so precopy never converged (453 s, 305 iterations). `--auto-converge` cut it to 221 s (disk ~140 s is near the link floor), with 10–20 s of guest lag at the end.
   - [x] Make `--auto-converge` the default in `scripts/migrate.sh` and add timings to guide Phase 7
-  - [ ] Try `fstrim -av` in the guest before migrating, and balloon deflate (guide 8.2), then re-measure with `--monitor`
+  - [x] Try `fstrim -av` in the guest before migrating, and balloon deflate (guide 8.2), then re-measure with `--monitor`: balloon deflate is built into `migrate.sh` (3 min 22–27 s total); `fstrim` reports ~40 GB but the qcow2 was already ~12 GB (`du`), so there is nothing to gain. The ~2.5 min disk phase is the Gigabit floor; only less allocated data or a faster link helps
   - [x] Add `migration-*.log` to `.gitignore`
   - [ ] (optional) Compression/multifd, only if still too slow: `--parallel --parallel-connections N`, zstd (check `virsh migrate --help` on both hosts first); CPU cost lands on the weaker laptop
   - [ ] (optional) Raise the allowed final pause with `virsh migrate-setmaxdowntime nomad <ms>` during migration, so precopy converges sooner at the cost of a longer pause
