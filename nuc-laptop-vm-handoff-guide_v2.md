@@ -32,7 +32,7 @@ The `scripts/` directory automates most of the steps below. They are idempotent 
 | `03-cpu-baseline.sh extract\|baseline\|verify` | 2 | extract and verify on both, baseline on one |
 | `04-nfs.sh server\|fstab` | 3 (optional) | NUC |
 | `05-create-vm.sh create\|apply-baseline` | 4 | one host |
-| `migrate.sh <peer> [--dry-run] [--monitor]` | 7 | the host currently running the VM (`--monitor` logs job stats to find slow phases) |
+| `migrate.sh <peer> [--dry-run] [--monitor[=1\|2\|3]]` | 7 | the host currently running the VM (`--monitor` logs job stats to find slow phases: 1 = network + job info, 2 = + both hosts' load, 3 = + thread/socket detail) |
 
 ---
 

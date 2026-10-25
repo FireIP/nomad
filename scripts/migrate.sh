@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Guide Phase 7: live-migrate the VM to the other host, with pre-checks.
-# Usage: migrate.sh <peer> [--dry-run] [--monitor]
+# Usage: migrate.sh <peer> [--dry-run] [--monitor[=1|2|3]]
 #   peer       ssh target of the destination, e.g. you@laptop.local
 #   --dry-run  run the pre-checks and print the command only
-#   --monitor  every MONITOR_INTERVAL seconds (default 5) sample, on BOTH hosts: busiest processes, QEMU threads, I/O pressure,
-#              image size, plus network bytes and `virsh domjobinfo` (3s timeout), into $OUT_DIR/migration-<timestamp>.log
+#   --monitor[=N]  every MONITOR_INTERVAL seconds (default 5) sample into $OUT_DIR/migration-<timestamp>.log:
+#              1 (default) network bytes + `virsh domjobinfo` (3s timeout), local host only
+#              2 + on BOTH hosts: I/O/memory pressure, busiest processes, QEMU threads
+#              3 + image size, QEMU thread states/wchan, migration TCP sockets (to debug stalls)
 # Run it on the host that currently runs the VM. Extra virsh migrate flags: MIGRATE_ARGS="...".
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -15,11 +17,12 @@ for a in "$@"; do
   case "$a" in
     --dry-run) DRY_RUN=1 ;;
     --monitor) MONITOR=1 ;;
+    --monitor=[123]) MONITOR="${a#--monitor=}" ;;
     -*) die "unknown option: $a" ;;
     *) [ -z "$PEER" ] || die "only one peer allowed"; PEER="$a" ;;
   esac
 done
-[ -n "$PEER" ] || die "usage: $0 <peer> [--dry-run] [--monitor]"
+[ -n "$PEER" ] || die "usage: $0 <peer> [--dry-run] [--monitor[=1|2|3]]"
 need_cmd virsh ssh xmllint
 
 [ "$(vm_state "$DOMAIN")" = "running" ] || die "'$DOMAIN' is not running on this host"
@@ -67,7 +70,7 @@ cmd=(virsh migrate --live --persistent --undefinesource --copy-storage-all --ver
 log "${cmd[*]}"
 [ "$DRY_RUN" -eq 1 ] && { log "Dry run, not migrating"; exit 0; }
 
-if [ "$MONITOR" -eq 1 ]; then
+if [ "$MONITOR" -ge 1 ]; then
   mon_log="$OUT_DIR/migration-$(date +%Y%m%d-%H%M%S).log"
   {
     echo "# command: ${cmd[*]}"
@@ -79,23 +82,25 @@ if [ "$MONITOR" -eq 1 ]; then
   # Samples must not depend on libvirt answering: during a migration the domain job lock can be held
   # and `virsh domjobinfo` times out, so use /proc-based numbers on BOTH hosts (the idle windows
   # in a slow migration can be on either side) plus domjobinfo with a short timeout.
-  probe() { # self-contained so it can be piped to the peer: probe <domain>
+  probe() { # self-contained so it can be piped to the peer: probe <domain> <level 2|3>
     export LC_ALL=C
     local pid
     pid="$(cat "/run/libvirt/qemu/$1.pid" 2>/dev/null || pidof qemu-system-x86_64 | awk '{print $1}')" || true
     echo "[io pressure] $(head -n1 /proc/pressure/io 2>/dev/null)"
     echo "[mem pressure] $(head -n1 /proc/pressure/memory 2>/dev/null)"
     echo "[mem] $(awk '/MemAvailable|SwapFree|SwapTotal/{printf "%s%s ",$1,$2}' /proc/meminfo) swap-in/out kB/s: $(vmstat 1 2 | tail -n1 | awk '{print $7"/"$8}')"
-    echo "[image] $(stat -c 'size=%s allocated=%b*%B' "/var/lib/libvirt/images/$1.qcow2" 2>&1)"
+    [ "$2" -ge 3 ] && echo "[image] $(stat -c 'size=%s allocated=%b*%B' "/var/lib/libvirt/images/$1.qcow2" 2>&1)"
     echo "[busiest processes]"
     top -b -n2 -d1 -w 120 2>&1 | awk '/^top -/{n++} n==2' | sed -n '7,11p'
     if [ -n "$pid" ]; then
       echo "[qemu threads]"
       top -H -b -n2 -d1 -w 120 -p "$pid" 2>&1 | awk '/^top -/{n++} n==2' | sed -n '7,10p'
-      echo "[qemu thread states: tid state wchan name]"
-      ps -L -o tid=,stat=,wchan:28=,comm= -p "$pid" 2>&1 | awk '$2 !~ /^S/ || NR<=2' | head -8
-      echo "[migration sockets]"
-      ss -tin 2>&1 | grep -A1 -E ':(49[0-9]{3})\b' | head -8
+      if [ "$2" -ge 3 ]; then
+        echo "[qemu thread states: tid state wchan name]"
+        ps -L -o tid=,stat=,wchan:28=,comm= -p "$pid" 2>&1 | awk '$2 !~ /^S/ || NR<=2' | head -8
+        echo "[migration sockets]"
+        ss -tin 2>&1 | grep -A1 -E ':(49[0-9]{3})\b' | head -8
+      fi
     fi
   }
   iface="$(ip route show default | awk '{print $5; exit}')" || true
@@ -107,24 +112,26 @@ if [ "$MONITOR" -eq 1 ]; then
         echo "[net $iface] $(awk -v i="$iface:" '$1==i{print "rx_bytes="$2" tx_bytes="$10}' /proc/net/dev)"
         echo "[domjobinfo]"
         timeout 3 virsh domjobinfo "$DOMAIN" 2>&1 || echo "(no answer within 3s)"
-        echo "--- local ($(hostname))"
-        probe "$DOMAIN"
-        echo "--- peer ($PEER)"
-        { declare -f probe; echo "probe $DOMAIN"; } | timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=3 "$PEER" bash -s 2>&1 \
-          || echo "(peer probe failed or timed out)"
+        if [ "$MONITOR" -ge 2 ]; then
+          echo "--- local ($(hostname))"
+          probe "$DOMAIN" "$MONITOR"
+          echo "--- peer ($PEER)"
+          { declare -f probe; echo "probe $DOMAIN $MONITOR"; } | timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=3 "$PEER" bash -s 2>&1 \
+            || echo "(peer probe failed or timed out)"
+        fi
       } >> "$mon_log"
       sleep "${MONITOR_INTERVAL:-5}"
     done
   ) &
   mon_pid=$!
   trap 'kill "$mon_pid" 2>/dev/null || true' EXIT
-  log "Sampling both hosts into $mon_log (interface ${iface:-unknown})"
+  log "Monitor level $MONITOR: sampling into $mon_log (interface ${iface:-unknown})"
 fi
 
 rc=0
 time "${cmd[@]}" || rc=$?
 
-if [ "$MONITOR" -eq 1 ]; then
+if [ "$MONITOR" -ge 1 ]; then
   kill "$mon_pid" 2>/dev/null || true
   # The domain is gone from this host after --undefinesource, so read the summary from the destination.
   {
