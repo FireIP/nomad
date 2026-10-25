@@ -8,6 +8,7 @@
 #              2 + on BOTH hosts: I/O/memory pressure, busiest processes, QEMU threads
 #              3 + image size, QEMU thread states/wchan, migration TCP sockets (to debug stalls)
 # Run it on the host that currently runs the VM. Extra virsh migrate flags: MIGRATE_ARGS="...".
+# --auto-converge is added by default (disable with NO_AUTO_CONVERGE=1).
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 PEER=""
@@ -65,7 +66,14 @@ if [[ " ${MIGRATE_ARGS:-} " != *" --migrateuri"* ]]; then
   else warn "could not resolve an IPv4 address for $PEER; QEMU will choose the address itself"; fi
 fi
 
-cmd=(virsh migrate --live --persistent --undefinesource --copy-storage-all --verbose ${MIGRATE_ARGS:-}
+# --auto-converge is on by default: a busy guest can dirty RAM as fast as the link sends it, so precopy
+# never converges (453 s vs 221 s measured). It throttles guest vCPUs near the end. NO_AUTO_CONVERGE=1 disables it.
+converge=()
+if [ "${NO_AUTO_CONVERGE:-0}" != 1 ] && [[ " ${MIGRATE_ARGS:-} " != *" --auto-converge"* ]]; then
+  converge=(--auto-converge)
+fi
+
+cmd=(virsh migrate --live --persistent --undefinesource --copy-storage-all --verbose "${converge[@]}" ${MIGRATE_ARGS:-}
      "${migrate_uri[@]}" "$DOMAIN" "qemu+ssh://$PEER/system")
 log "${cmd[*]}"
 [ "$DRY_RUN" -eq 1 ] && { log "Dry run, not migrating"; exit 0; }
