@@ -32,7 +32,7 @@ The `scripts/` directory automates most of the steps below. They are idempotent 
 | `03-cpu-baseline.sh extract\|baseline\|verify` | 2 | extract and verify on both, baseline on one |
 | `04-nfs.sh server\|fstab` | 3 (optional) | NUC |
 | `05-create-vm.sh create\|apply-baseline` | 4 | one host |
-| `migrate.sh <peer>` | 7 | the host currently running the VM |
+| `migrate.sh <peer> [--dry-run] [--monitor]` | 7 | the host currently running the VM (`--monitor` logs job stats to find slow phases) |
 
 ---
 
@@ -440,11 +440,13 @@ virsh migrate --live --persistent --undefinesource --copy-storage-all \
   nomad qemu+ssh://you@nuc.local/system
 ```
 
-Both directions have been verified working (NUC → laptop and laptop → NUC), but each took a long time, since the whole disk is copied every time. Requirements for it to work: `rom.bar=off` on the NIC (Phase 4) and matching QEMU/machine type.
+Both directions have been verified working (NUC → laptop and laptop → NUC). The whole disk is copied every time.
+
+**Pin the data connection to IPv4.** By default QEMU connects to whatever the destination's hostname resolves to, IPv6 first. If the destination's firewall drops IPv6 on the migration ports (49152–49215), each attempt waits for the TCP SYN timeout and the migration stalls for minutes (twice, ~9 min each, laptop → NUC) while `virsh domjobinfo` times out and the guest freezes. Add `--migrateuri tcp://<destination IPv4>`; `scripts/migrate.sh` does this automatically. Requirements for it to work: `rom.bar=off` on the NIC (Phase 4) and matching QEMU/machine type.
 
 `--persistent` writes the domain config on the destination; `--undefinesource` removes it from wherever it just left, so the VM's definition always lives wherever the VM currently is.
 
-**One thing to specifically test on your third migration** (the first "back home" leg): `--undefinesource` removes the libvirt *config* from the source, not the leftover disk file sitting in `/var/lib/libvirt/images/`. Whether `--copy-storage-all` cleanly overwrites that stale file or errors against it isn't something to assume — watch it happen once, and clean up manually if needed.
+**Stale disk files:** `--undefinesource` removes the libvirt *config* from the source, not the leftover disk file in `/var/lib/libvirt/images/`. That is fine: `--copy-storage-all` overwrites the stale file on the next migration back (verified on both hosts). `scripts/migrate.sh` only warns about it.
 
 ---
 
@@ -512,5 +514,6 @@ If plain virtio-gpu feels sluggish and it bothers you enough to troubleshoot dri
 - **Live migration fails with `error while loading state for instance 0x0 of device 'ram' ... ret: -22`** → this is a generic wrapper. Read `/var/log/libvirt/qemu/nomad.log` on the *destination* for the real cause. Known one: `Size mismatch: ...virtio-net-pci.rom` — add `<rom bar='off'/>` to the NIC (Phase 4), with the guest shut down, on whichever host defines the domain. Matching QEMU versions and machine types alone did not fix it.
 - **`Security driver model 'apparmor' is not available`** → see `FIX-apparmor-migration.md`.
 - **`TSC frequency mismatch ... TSC scaling unavailable` in the log** → expected when migrating to the laptop; the baseline drops `invtsc` so the guest uses `kvm-clock`. Verify with `cat /sys/devices/system/clocksource/clocksource0/current_clocksource` in the guest.
-- **Second live migration onward fails or behaves oddly with the disk** → this is the stale-file scenario from Phase 7 — check what's actually sitting at the destination path before assuming.
+- **Migration stalls for minutes, `virsh domjobinfo` times out, guest freezes** → check `ss -tin` on the source for `SYN-SENT` connections to the destination on ports 49152+, usually IPv6. Pin IPv4 with `--migrateuri tcp://<destination IPv4>` (Phase 7).
+- **Second live migration onward fails or behaves oddly with the disk** → check what's actually sitting at the destination path (Phase 7). A stale file from an earlier migration is normally overwritten without problems.
 - **`virsh` commands don't show the VM or network you expect** → check `virsh uri`. If it prints `qemu:///session` instead of `qemu:///system`, you're quietly talking to the wrong libvirt instance — see Phase 1.4.
