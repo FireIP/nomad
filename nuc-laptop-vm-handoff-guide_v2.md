@@ -430,17 +430,19 @@ Once cold migration is proven, this is your daily command. Run it 10–20 minute
 
 ```bash
 # From the NUC, when it's time to head out:
-virsh migrate --live --persistent --undefinesource --copy-storage-all \
+virsh migrate --live --persistent --undefinesource --copy-storage-all --auto-converge \
   nomad qemu+ssh://you@laptop.local/system
 ```
 
 ```bash
 # From the laptop, once you're docked again:
-virsh migrate --live --persistent --undefinesource --copy-storage-all \
+virsh migrate --live --persistent --undefinesource --copy-storage-all --auto-converge \
   nomad qemu+ssh://you@nuc.local/system
 ```
 
 Both directions have been verified working (NUC → laptop and laptop → NUC). The whole disk is copied every time.
+
+**Use `--auto-converge`.** On wired Gigabit (~111 MiB/s) the disk phase takes ~2.5 min (12.4 GiB allocated) and is close to the link limit. The RAM phase is the variable part: if the guest dirties memory as fast as the link sends it (measured while playing YouTube: ~117 MiB/s), precopy never converges. That took 453 s and 305 iterations; with `--auto-converge` it took 221 s and 31 iterations, at the price of 10–20 s of guest lag at the very end while vCPUs are throttled (up to 90%). An idle guest is barely affected. `scripts/migrate.sh` adds the flag by default (`NO_AUTO_CONVERGE=1` disables it) and `--monitor` logs the job stats to see where the time goes.
 
 **Pin the data connection to IPv4.** By default QEMU connects to whatever the destination's hostname resolves to, IPv6 first. If the destination's firewall drops IPv6 on the migration ports (49152–49215), each attempt waits for the TCP SYN timeout and the migration stalls for minutes (twice, ~9 min each, laptop → NUC) while `virsh domjobinfo` times out and the guest freezes. Add `--migrateuri tcp://<destination IPv4>`; `scripts/migrate.sh` does this automatically. Requirements for it to work: `rom.bar=off` on the NIC (Phase 4) and matching QEMU/machine type.
 
