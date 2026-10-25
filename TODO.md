@@ -3,9 +3,16 @@
 ## Blocking
 
 - [x] **Fix live migration** — fixed. Causes: virtio-net option ROM size mismatch between hosts (`<rom bar='off'/>` on the NIC) and AppArmor missing on one host. Verified in both directions.
-- [ ] **Investigate slow migrations** — both directions took very long. Measure where time goes (full 60GB qcow2 copy vs. RAM), check disk usage and network throughput, consider `--compressed` or a smaller disk.
-- [ ] Verify guest clocksource is `kvm-clock` and time stays correct after migration (TSC scaling warning on the laptop)
-- [ ] Re-test the stale destination qcow2 case (Phase 7 note)
+- [x] **Slow laptop → NUC migration (20 min vs 3–5 min the other way)** — fixed: QEMU tried the NUC's IPv6 addresses first and each attempt waited for the TCP SYN timeout (two ~9 min stalls). `migrate.sh` now pins `--migrateuri tcp://<peer IPv4>`. Verified.
+- [ ] **Slow migrations (busy guest)** — cause found: with a busy guest (YouTube) the RAM dirty rate (~117 MiB/s) matched the Gigabit link (~111 MiB/s), so precopy never converged (453 s, 305 iterations). `--auto-converge` cut it to 221 s (disk ~140 s is near the link floor), with 10–20 s of guest lag at the end.
+  - [ ] Make `--auto-converge` the default in `scripts/migrate.sh` and add timings to guide Phase 7
+  - [ ] Try `fstrim -av` in the guest before migrating, and balloon deflate (guide 8.2), then re-measure with `--monitor`
+  - [x] Add `migration-*.log` to `.gitignore`
+  - [ ] (optional) Compression/multifd, only if still too slow
+  - [ ] (optional) 2.5GbE adapter for the laptop (NUC already has 2.5GbE)
+  - [ ] (optional, experiment) Overlay qcow2 on a shared read-only base + `--copy-storage-inc`: could cut the ~140 s disk phase to seconds, but needs a byte-identical base on both hosts, periodic `blockcommit` and base re-sync, and changes the disk layout in the guide, `nomad.xml` and scripts. Try on a throwaway VM first.
+- [x] Guest clocksource verified as `kvm-clock`
+- [x] Stale destination qcow2 is overwritten cleanly by `--copy-storage-all` (confirmed)
 
 ## Setup scripts
 
@@ -15,7 +22,7 @@
 - [ ] Test a real `migrate.sh <peer>` in both directions
 - [x] Update guide Phase 2.4 to use `hypervisor-cpu-compare` (plain `cpu-compare` gave a false "incompatible")
 - [ ] (only if NFS gets set up) Set up NFS with `04-nfs.sh server`, test it, then add the `/mnt/bulk` mount in the guest
-- [ ] Decide whether to drop `collect-migration-info.sh` now that debugging is done
+- [x] Keep `collect-migration-info.sh` as a standalone debug helper
 - [ ] (low priority) Test `01-install.sh` on a host (safe to re-run; check it doesn't repeat group or `~/.bashrc` changes)
 - [ ] (low priority) Test `05-create-vm.sh create` and `apply-baseline` with a throwaway domain (`DOMAIN=nomad-test IMG=/var/lib/libvirt/images/nomad-test.qcow2`), then remove it with `virsh undefine nomad-test --nvram`
 
