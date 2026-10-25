@@ -47,7 +47,7 @@
 - [x] `scripts/nomad` (`start`, `migrate`, `inflate`, `deflate`, `status`) and `scripts/06-install-tools.sh`; route probing (eth then wifi), progress/ETA, stall alerts, auto-inflate on arrival (`nomad migrate` and `06-install-tools.sh` verified on the real hosts)
 - [x] Tested on the real hosts: `nomad migrate` both ways, `nomad start`, Ctrl-C abort, wifi fallback
 - [ ] Test the stall alert (no data for `STALL_SECS`: bell, red message, desktop notification)
-- [x] `nomad start` / `nomad migrate` open the console (`nomad viewer`, `VIEWER`/`VIEWER_CMD` in the config): locally on start, on the destination plus a `qemu+ssh` viewer on the source after migrate. Untested on the real hosts (destination GUI-session launch over ssh, SPICE over ssh)
+- [x] `nomad start` / `nomad migrate` open the console (`nomad viewer`, `VIEWER`/`VIEWER_CMD` in the config): locally on start, on the destination after migrate (a viewer on the source too is opt-in with `VIEWER_SOURCE=1`: SPICE is single-client, so two viewers disconnect/freeze each other). Untested on the real hosts (destination GUI-session launch over ssh, SPICE over ssh)
 - [ ] Test the auto-opened console on the real hosts, then multiple monitors (see the multi-monitor item above)
 
 ## Guide
