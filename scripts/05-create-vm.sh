@@ -4,12 +4,15 @@
 #   05-create-vm.sh create --iso /path/to/your-installer.iso   run on the NUC or laptop, once
 #   (finish the OS install in the guest, then shut it down)
 #   05-create-vm.sh apply-baseline                             replaces <cpu> with baseline-cpu.xml
-# Env: MEM_MB (12288), VCPUS (6), DISK_GB (60), IMG (/var/lib/libvirt/images/nomad.qcow2).
+#   05-create-vm.sh apply-limits                               guide 8.1/8.2: max 16 vCPUs / 32 GiB, current 6 / 12 GiB
+# Env: MEM_MB (12288), VCPUS (6), MAX_MEM_MB (32768), MAX_VCPUS (16), DISK_GB (60), IMG (/var/lib/libvirt/images/nomad.qcow2).
 # These must stay consistent with the guide and nomad.xml.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 MEM_MB="${MEM_MB:-12288}"
 VCPUS="${VCPUS:-6}"
+MAX_MEM_MB="${MAX_MEM_MB:-32768}"
+MAX_VCPUS="${MAX_VCPUS:-16}"
 DISK_GB="${DISK_GB:-60}"
 IMG="${IMG:-/var/lib/libvirt/images/nomad.qcow2}"
 
@@ -67,7 +70,25 @@ sys.stdout.write(ET.tostring(dom, encoding="unicode"))
     virsh define "$tmp"
     log "Baseline applied. Verify with: virsh dumpxml $DOMAIN | grep -A3 '<cpu'"
     ;;
+  apply-limits)
+    need_cmd virsh python3
+    vm_exists "$DOMAIN" || die "domain '$DOMAIN' does not exist on this host"
+    [ "$(vm_state "$DOMAIN")" = "shut off" ] || die "shut '$DOMAIN' down first (virsh shutdown $DOMAIN)"
+    tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+    virsh dumpxml --inactive "$DOMAIN" | python3 -c '
+import sys, xml.etree.ElementTree as ET
+ET.register_namespace("libosinfo", "http://libosinfo.org/xmlns/libvirt/domain/1.0")
+dom = ET.parse(sys.stdin).getroot()
+cur_mem, max_mem, cur_cpu, max_cpu = sys.argv[1:5]
+for tag, val in (("memory", max_mem), ("currentMemory", cur_mem)):
+    e = dom.find(tag); e.text = str(int(val) * 1024); e.set("unit", "KiB")
+v = dom.find("vcpu"); v.text = max_cpu; v.set("current", cur_cpu)
+sys.stdout.write(ET.tostring(dom, encoding="unicode"))
+' "$MEM_MB" "$MAX_MEM_MB" "$VCPUS" "$MAX_VCPUS" > "$tmp"
+    virsh define "$tmp"
+    log "Limits applied ($VCPUS/$MAX_VCPUS vCPUs, $MEM_MB/$MAX_MEM_MB MiB). Verify with: virsh dumpxml $DOMAIN | grep -E '<memory|<currentMemory|<vcpu'"
+    ;;
   *)
-    die "usage: $0 create --iso /path/to.iso | apply-baseline"
+    die "usage: $0 create --iso /path/to.iso | apply-baseline | apply-limits"
     ;;
 esac
