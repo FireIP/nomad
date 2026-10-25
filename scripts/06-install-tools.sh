@@ -2,13 +2,14 @@
 # Installs the `nomad` command on this host: symlink in ~/.local/bin and config in ~/.config/nomad/config.
 # Run it on BOTH hosts. Safe to re-run; existing values are offered as defaults.
 # Usage: 06-install-tools.sh [--role strong|weak] [--routes "alias1 alias2"] [--auto-inflate|--no-auto-inflate]
+#                            [--viewer-cmd virt-viewer|virt-manager] [--no-viewer]
 #                            [--non-interactive]
 #   --routes   ssh aliases (from ~/.ssh/config) that reach the OTHER host, best first: ethernet, then wifi, ...
 #   --role     strong = the NUC (inflates, never deflated for the laptop's sake), weak = the laptop
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CONFIG="${NOMAD_CONFIG:-$HOME/.config/nomad/config}"
-ROLE="" ROUTES="" AUTO_INFLATE=""
+ROLE="" ROUTES="" AUTO_INFLATE="" VIEWER="" VIEWER_CMD=""
 [ ! -r "$CONFIG" ] || source "$CONFIG"
 INTERACTIVE=1
 while [ $# -gt 0 ]; do
@@ -17,6 +18,8 @@ while [ $# -gt 0 ]; do
     --routes) ROUTES="${2:?}"; shift ;;
     --auto-inflate) AUTO_INFLATE=1 ;;
     --no-auto-inflate) AUTO_INFLATE=0 ;;
+    --viewer-cmd) VIEWER_CMD="${2:?}"; VIEWER=1; shift ;;
+    --no-viewer) VIEWER=0 ;;
     --non-interactive) INTERACTIVE=0 ;;
     *) die "unknown option: $1" ;;
   esac
@@ -41,6 +44,16 @@ if [ "$INTERACTIVE" = 1 ]; then
   read -r -p "Inflate the VM automatically after migrating to the strong host? (y/n) [$([ "$AUTO_INFLATE" = 1 ] && echo y || echo n)]: " a || true
   case "$a" in [Yy]*) AUTO_INFLATE=1 ;; [Nn]*) AUTO_INFLATE=0 ;; esac
 fi
+[ -n "$VIEWER" ] || VIEWER=1
+if [ -z "$VIEWER_CMD" ]; then
+  if command -v virt-viewer >/dev/null 2>&1 || ! command -v virt-manager >/dev/null 2>&1; then VIEWER_CMD=virt-viewer; else VIEWER_CMD=virt-manager; fi
+fi
+if [ "$INTERACTIVE" = 1 ]; then
+  a=""
+  read -r -p "Open the VM console automatically on start/migrate? (y/n) [$([ "$VIEWER" = 1 ] && echo y || echo n)]: " a || true
+  case "$a" in [Yy]*) VIEWER=1 ;; [Nn]*) VIEWER=0 ;; esac
+  [ "$VIEWER" != 1 ] || ask VIEWER_CMD "Console program (virt-viewer or virt-manager)"
+fi
 
 for r in $ROUTES; do
   if ssh -o BatchMode=yes -o ConnectTimeout=3 "$r" true 2>/dev/null; then log "ssh $r: ok"
@@ -53,6 +66,8 @@ mkdir -p "$(dirname "$CONFIG")" "$HOME/.local/bin"
   echo "ROLE=$ROLE"
   echo "ROUTES=\"$ROUTES\""
   echo "AUTO_INFLATE=$AUTO_INFLATE"
+  echo "VIEWER=$VIEWER"
+  echo "VIEWER_CMD=$VIEWER_CMD"
   echo "STALL_SECS=${STALL_SECS:-60}"
 } > "$CONFIG"
 ln -sfn "$SCRIPT_DIR/nomad" "$HOME/.local/bin/nomad"
@@ -60,6 +75,7 @@ chmod +x "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR/nomad"
 log "Wrote $CONFIG and linked ~/.local/bin/nomad -> $SCRIPT_DIR/nomad"
 
 command -v notify-send >/dev/null 2>&1 || warn "notify-send not found; stall alerts will only ring the terminal bell (apt install libnotify-bin)"
+[ "$VIEWER" != 1 ] || command -v "$VIEWER_CMD" >/dev/null 2>&1 || warn "$VIEWER_CMD not found (apt install virt-viewer / virt-manager)"
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
   *) warn "~/.local/bin is not in PATH: bash: export PATH=\"\$HOME/.local/bin:\$PATH\"   fish: fish_add_path ~/.local/bin" ;;

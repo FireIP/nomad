@@ -462,8 +462,9 @@ Both directions have been verified working (NUC → laptop and laptop → NUC). 
 
 | Command | What it does |
 |---|---|
-| `nomad migrate` | picks the first reachable route (ethernet before wifi), runs the pre-checks, deflates if needed, migrates with a live line (phase, disk %, RAM left, MiB/s, ETA), then runs `nomad inflate` on the other host if it is the strong one. `--inflate` / `--no-inflate` override the default, `--route ALIAS` forces a route, `--dry-run` only checks |
-| `nomad start` | starts the VM here; refuses if the other host has a running copy (or can't be reached; `FORCE=1` overrides) |
+| `nomad migrate` | picks the first reachable route (ethernet before wifi), runs the pre-checks, deflates if needed, migrates with a live line (phase, disk %, RAM left, MiB/s, ETA), then runs `nomad inflate` on the other host if it is the strong one. Afterwards it opens the console on the other host (over ssh, in its graphical session) and on this host via `qemu+ssh://<route>/system`. `--inflate` / `--no-inflate` override the default, `--route ALIAS` forces a route, `--dry-run` only checks |
+| `nomad start` | starts the VM here; refuses if the other host has a running copy (or can't be reached; `FORCE=1` overrides), then opens the console |
+| `nomad viewer` | opens the console for the VM wherever it runs (here, else over `qemu+ssh` to the other host). `start` / `migrate` take `--viewer` / `--no-viewer`; the defaults are `VIEWER=1` and `VIEWER_CMD=virt-viewer` (or `virt-manager`) in `~/.config/nomad/config` |
 | `nomad inflate` / `deflate` / `status` | resize the VM running on this host (Phase 8) |
 
 If no data moves for `STALL_SECS` (60) the terminal rings, a red message appears and `notify-send` shows a desktop notification; Ctrl-C asks whether to abort the migration. The ETA is approximate: RAM dirtying makes the remaining amount move. The raw `virsh migrate` command above still works and `migrate.sh <peer> --progress` is what `nomad migrate` calls.
