@@ -42,6 +42,12 @@
 
 - [ ] Multiple monitors for the VM: add a second video head (`<video><model type='virtio' heads='2'/></video>` in `nomad.xml`, same on both hosts) and open it with `remote-viewer` / `virt-viewer --connect qemu:///system nomad` (multi-monitor via SPICE, `spice-vdagent` in the guest). Check it survives migration and that the laptop's own display plus an external monitor work. Update guide Phase 4/8 and `05-create-vm.sh` if it works
 
+## `nomad` command
+
+- [x] `scripts/nomad` (`start`, `migrate`, `inflate`, `deflate`, `status`) and `scripts/06-install-tools.sh`; route probing (eth then wifi), progress/ETA, stall alerts, auto-inflate on arrival (mock-tested only)
+- [ ] Test on the real hosts: install on both, `nomad migrate` both ways (check ETA, stall alert, Ctrl-C abort, wifi fallback with the ethernet cable pulled), `nomad start`
+- [ ] `nomad migrate` and `nomad start` should open the VM monitor on the receiving/starting host (`virt-viewer --connect qemu:///system nomad`), later with multiple monitors (see the multi-monitor item above)
+
 ## Guide
 
 - [ ] Keep `nuc-laptop-vm-handoff-guide_v2.md` in sync with the scripts

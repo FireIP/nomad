@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Guide Phase 7: live-migrate the VM to the other host, with pre-checks.
-# Usage: migrate.sh <peer> [--dry-run] [--monitor[=1|2|3]]
+# Usage: migrate.sh <peer> [--dry-run] [--progress] [--monitor[=1|2|3]]
 #   peer       ssh target of the destination, e.g. you@laptop.local
 #   --dry-run  run the pre-checks and print the command only
+#   --progress live phase/percent/rate/ETA line and stall alerts instead of virsh's own output (used by `nomad migrate`)
 #   --monitor[=N]  every MONITOR_INTERVAL seconds (default 5) sample into $OUT_DIR/migration-<timestamp>.log:
 #              1 (default) network bytes + `virsh domjobinfo` (3s timeout), local host only
 #              2 + on BOTH hosts: I/O/memory pressure, busiest processes, QEMU threads
@@ -16,16 +17,18 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 PEER=""
 DRY_RUN=0
 MONITOR=0
+PROGRESS=0
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY_RUN=1 ;;
+    --progress) PROGRESS=1 ;;
     --monitor) MONITOR=1 ;;
     --monitor=[123]) MONITOR="${a#--monitor=}" ;;
     -*) die "unknown option: $a" ;;
     *) [ -z "$PEER" ] || die "only one peer allowed"; PEER="$a" ;;
   esac
 done
-[ -n "$PEER" ] || die "usage: $0 <peer> [--dry-run] [--monitor[=1|2|3]]"
+[ -n "$PEER" ] || die "usage: $0 <peer> [--dry-run] [--progress] [--monitor[=1|2|3]]"
 need_cmd virsh ssh xmllint
 
 [ "$(vm_state "$DOMAIN")" = "running" ] || die "'$DOMAIN' is not running on this host"
@@ -93,7 +96,9 @@ if [ "${NO_AUTO_CONVERGE:-0}" != 1 ] && [[ " ${MIGRATE_ARGS:-} " != *" --auto-co
   converge=(--auto-converge)
 fi
 
-cmd=(virsh migrate --live --persistent --undefinesource --copy-storage-all --verbose "${converge[@]}" ${MIGRATE_ARGS:-}
+verbose=(--verbose)
+[ "$PROGRESS" -eq 0 ] || verbose=()
+cmd=(virsh migrate --live --persistent --undefinesource --copy-storage-all "${verbose[@]}" "${converge[@]}" ${MIGRATE_ARGS:-}
      "${migrate_uri[@]}" "$DOMAIN" "qemu+ssh://$PEER/system")
 log "${cmd[*]}"
 [ "$DRY_RUN" -eq 1 ] && { log "Dry run, not migrating"; exit 0; }
@@ -157,7 +162,11 @@ if [ "$MONITOR" -ge 1 ]; then
 fi
 
 rc=0
-time "${cmd[@]}" || rc=$?
+if [ "$PROGRESS" -eq 1 ]; then
+  run_with_progress "$DOMAIN" "${cmd[@]}" || rc=$?
+else
+  time "${cmd[@]}" || rc=$?
+fi
 
 if [ "$MONITOR" -ge 1 ]; then
   kill "$mon_pid" 2>/dev/null || true

@@ -73,3 +73,91 @@ resize_guest() {
   warn "after ${timeout}s: $(cur_vcpus "$dom") vCPUs, $(($(cur_mem_kib "$dom") / 1024)) MiB (wanted $vcpus, $((mem / 1024)) MiB)"
   return 1
 }
+
+# Progress display for a long-running `virsh migrate` (used by migrate.sh --progress / nomad migrate).
+fmt_dur()  { local s="$1"; if [ "$s" -ge 3600 ]; then printf '%dh%02dm' $((s / 3600)) $((s % 3600 / 60)); else printf '%dm%02ds' $((s / 60)) $((s % 60)); fi; }
+fmt_size() { awk -v b="$1" 'BEGIN{ if (b >= 1073741824) printf "%.1f GiB", b/1073741824; else printf "%.0f MiB", b/1048576 }'; }
+
+# alert <message>: terminal bell, red message and a desktop notification when one is available.
+alert() {
+  printf '\a\n\033[1;31m!! %s\033[0m\n' "$*" >&2
+  command -v notify-send >/dev/null 2>&1 && notify-send -u critical "nomad" "$*" >/dev/null 2>&1 || true
+}
+
+# Turns `virsh domjobinfo` text (stdin) into key=value lines in bytes.
+parse_job() {
+  awk '
+    function b(v, u) { m["B"]=1; m["KiB"]=1024; m["MiB"]=1048576; m["GiB"]=1073741824; m["TiB"]=1099511627776; return v * m[u] }
+    /^Job type:/          { running = ($3 == "Unbounded") }
+    /^Data processed:/    { printf "data_done=%.0f\n", b($3, $4); have = 1 }
+    /^Data remaining:/    { printf "data_left=%.0f\n", b($3, $4) }
+    /^Memory remaining:/  { printf "mem_left=%.0f\n", b($3, $4) }
+    /^File processed:/    { printf "file_done=%.0f\n", b($3, $4) }
+    /^File remaining:/    { printf "file_left=%.0f\n", b($3, $4) }
+    /^Iteration:/         { printf "iter=%d\n", $2 }
+    END                   { printf "have=%d\n", (have && running) ? 1 : 0 }'
+}
+
+_progress_interrupt() {
+  local a=n
+  printf '\n'
+  read -r -p "Abort the migration? [y/N] " a </dev/tty || true
+  if [[ "$a" =~ ^[Yy] ]]; then virsh domjob-abort "$_PROG_DOM" || warn "could not abort the job"; fi
+}
+
+# run_with_progress <domain> <command...>: runs the (migrate) command in the background and shows phase,
+# percentage, rate and ETA from `virsh domjobinfo` every 2 s. Alerts when no data moved for STALL_SECS (60).
+# Ctrl-C asks whether to abort the migration instead of killing the display.
+run_with_progress() {
+  local dom="$1"; shift
+  local out pid rc=0 stall="${STALL_SECS:-60}" start="$SECONDS" last_prog="$SECONDS" alerted=0 prev_done=-1
+  local -a ht=() hb=()
+  local info k v now rate eta phase line disk_pct i
+  local have data_done data_left mem_left file_done file_left iter
+  _PROG_DOM="$dom"
+  out="$(mktemp)"
+  "$@" >"$out" 2>&1 &
+  pid=$!
+  trap _progress_interrupt INT
+  while kill -0 "$pid" 2>/dev/null; do
+    have=0 data_done=0 data_left=0 mem_left=0 file_done=0 file_left=0 iter=0
+    info="$(timeout 3 virsh domjobinfo "$dom" 2>/dev/null)" || info=""
+    while IFS== read -r k v; do printf -v "$k" '%s' "$v"; done < <(parse_job <<<"$info")
+    now="$SECONDS"
+    if [ "$have" = 1 ]; then
+      if [ "$data_done" -gt "$prev_done" ]; then
+        last_prog="$now"; alerted=0; prev_done="$data_done"
+        ht+=("$now"); hb+=("$data_done")
+        while [ "${#ht[@]}" -gt 2 ] && [ "$((now - ht[0]))" -gt 30 ]; do ht=("${ht[@]:1}"); hb=("${hb[@]:1}"); done
+      fi
+      rate=0; eta="?"
+      i=$((${#ht[@]} - 1))
+      if [ "$((now - last_prog))" -lt 6 ] && [ "$i" -ge 1 ] && [ "${ht[i]}" -gt "${ht[0]}" ]; then
+        rate=$(((hb[i] - hb[0]) / (ht[i] - ht[0])))
+        [ "$rate" -gt 0 ] && eta="~$(fmt_dur $((data_left / rate)))"
+      fi
+      if [ "$file_left" -gt 0 ]; then
+        disk_pct=$((file_done * 100 / (file_done + file_left)))
+        phase="disk+RAM copy: disk ${disk_pct}%, RAM left $(fmt_size "$mem_left")"
+      else
+        phase="RAM sync (round $iter), left $(fmt_size "$mem_left")"
+      fi
+      line="$phase | $((rate / 1048576)) MiB/s | ETA $eta"
+    else
+      line="waiting for libvirt..."
+    fi
+    if [ "$((now - last_prog))" -ge "$stall" ] && [ "$alerted" = 0 ]; then
+      alerted=1
+      alert "Migration stalled: no data moved for ${stall}s. Check the peer, the network link and 'virsh domjobinfo $dom'; Ctrl-C offers to abort."
+    fi
+    printf '\r\033[K[%s] %s' "$(fmt_dur $((now - start)))" "$line"
+    sleep 2 & wait $! || true
+  done
+  wait "$pid" || rc=$?
+  trap - INT
+  printf '\r\033[K'
+  if [ "$rc" -ne 0 ]; then warn "migration failed (exit $rc):"; tail -n 20 "$out" >&2; fi
+  rm -f "$out"
+  log "Migration command ran for $(fmt_dur $((SECONDS - start)))"
+  return "$rc"
+}

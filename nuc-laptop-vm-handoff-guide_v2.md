@@ -32,7 +32,9 @@ The `scripts/` directory automates most of the steps below. They are idempotent 
 | `03-cpu-baseline.sh extract\|baseline\|verify` | 2 | extract and verify on both, baseline on one |
 | `04-nfs.sh server\|fstab` | 3 (optional) | NUC |
 | `05-create-vm.sh create\|apply-baseline` | 4 | one host |
-| `migrate.sh <peer> [--dry-run] [--monitor[=1\|2\|3]]` | 7 | the host currently running the VM (`--monitor` logs job stats to find slow phases: 1 = network + job info, 2 = + both hosts' load, 3 = + thread/socket detail) |
+| `06-install-tools.sh` | 7.1 | both |
+| `nomad start\|migrate\|inflate\|deflate\|status` | 7.1 | either host (the daily command, installed by `06-install-tools.sh`) |
+| `migrate.sh <peer> [--dry-run] [--progress] [--monitor[=1\|2\|3]]` | 7 | the host currently running the VM (`--monitor` logs job stats to find slow phases: 1 = network + job info, 2 = + both hosts' load, 3 = + thread/socket detail) |
 
 ---
 
@@ -453,6 +455,18 @@ Both directions have been verified working (NUC → laptop and laptop → NUC). 
 **Use `--auto-converge`.** On wired Gigabit (~111 MiB/s) the disk phase takes ~2.5 min (12.4 GiB allocated) and is close to the link limit. The RAM phase is the variable part: if the guest dirties memory as fast as the link sends it (measured while playing YouTube: ~117 MiB/s), precopy never converges. That took 453 s and 305 iterations; with `--auto-converge` it took 221 s and 31 iterations, at the price of 10–20 s of guest lag at the very end while vCPUs are throttled (up to 90%). An idle guest is barely affected. `scripts/migrate.sh` adds the flag by default (`NO_AUTO_CONVERGE=1` disables it) and `--monitor` logs the job stats to see where the time goes. With the guest deflated to 12 GiB / 6 vCPUs first (Phase 8), a migration took 3 min 27 s NUC → laptop (plus ~30 s deflate) and 3 min 22 s laptop → NUC, with YouTube playing throughout.
 
 **Pin the data connection to IPv4.** By default QEMU connects to whatever the destination's hostname resolves to, IPv6 first. If the destination's firewall drops IPv6 on the migration ports (49152–49215), each attempt waits for the TCP SYN timeout and the migration stalls for minutes (twice, ~9 min each, laptop → NUC) while `virsh domjobinfo` times out and the guest freezes. Add `--migrateuri tcp://<destination IPv4>`; `scripts/migrate.sh` does this automatically. Requirements for it to work: `rom.bar=off` on the NIC (Phase 4) and matching QEMU/machine type.
+
+### 7.1 The `nomad` command (daily routine)
+
+`scripts/06-install-tools.sh` (run on both hosts) asks which role the host has (strong = NUC, weak = laptop), the ssh aliases that reach the *other* host (best first, e.g. `laptop-eth laptop-wifi`, defined in `~/.ssh/config`), and whether to inflate automatically after migrating to the strong host. It writes `~/.config/nomad/config` and links `~/.local/bin/nomad` (fish: `fish_add_path ~/.local/bin`). Non-interactive: `--role`, `--routes "a b"`, `--auto-inflate|--no-auto-inflate`, `--non-interactive`.
+
+| Command | What it does |
+|---|---|
+| `nomad migrate` | picks the first reachable route (ethernet before wifi), runs the pre-checks, deflates if needed, migrates with a live line (phase, disk %, RAM left, MiB/s, ETA), then runs `nomad inflate` on the other host if it is the strong one. `--inflate` / `--no-inflate` override the default, `--route ALIAS` forces a route, `--dry-run` only checks |
+| `nomad start` | starts the VM here; refuses if the other host has a running copy (or can't be reached; `FORCE=1` overrides) |
+| `nomad inflate` / `deflate` / `status` | resize the VM running on this host (Phase 8) |
+
+If no data moves for `STALL_SECS` (60) the terminal rings, a red message appears and `notify-send` shows a desktop notification; Ctrl-C asks whether to abort the migration. The ETA is approximate: RAM dirtying makes the remaining amount move. The raw `virsh migrate` command above still works and `migrate.sh <peer> --progress` is what `nomad migrate` calls.
 
 `--persistent` writes the domain config on the destination; `--undefinesource` removes it from wherever it just left, so the VM's definition always lives wherever the VM currently is.
 

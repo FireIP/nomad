@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Daily-driver wrapper around the other scripts. Install with scripts/06-install-tools.sh.
+# Usage: nomad <command>
+#   start                      start the VM here (refuses if it is defined/running on the other host)
+#   migrate [options]          hand the running VM over to the other host, with progress and alerts
+#       --inflate | --no-inflate   inflate on arrival at the strong host (default: AUTO_INFLATE from the config)
+#       --route ALIAS              use this ssh alias instead of probing the configured routes
+#       --dry-run                  checks only
+#       --monitor[=1|2|3]          also write the detailed debug log (see migrate.sh)
+#   inflate | deflate | status     resize the VM running on this host (see inflate.sh)
+# Config: ${NOMAD_CONFIG:-~/.config/nomad/config}: ROLE=strong|weak (this host), ROUTES="alias1 alias2" (ssh aliases of
+# the OTHER host in order of preference, e.g. ethernet first, then wifi), AUTO_INFLATE=1|0, STALL_SECS (60).
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.sh"
+
+CONFIG="${NOMAD_CONFIG:-$HOME/.config/nomad/config}"
+[ -r "$CONFIG" ] || die "no config at $CONFIG; run scripts/06-install-tools.sh"
+ROLE="" ROUTES="" AUTO_INFLATE=1
+source "$CONFIG"
+[ "$ROLE" = strong ] || [ "$ROLE" = weak ] || die "ROLE in $CONFIG must be 'strong' or 'weak'"
+[ -n "$ROUTES" ] || die "ROUTES in $CONFIG is empty"
+export STALL_SECS="${STALL_SECS:-60}"
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=3)
+
+# First configured route whose ssh works (ethernet is listed before wifi); prints the alias.
+pick_route() {
+  local r
+  for r in $ROUTES; do
+    if ssh "${SSH_OPTS[@]}" "$r" true 2>/dev/null; then echo "$r"; return 0; fi
+    warn "route $r unreachable" >&2
+  done
+  return 1
+}
+
+cmd_start() {
+  need_cmd virsh ssh
+  if ! vm_exists "$DOMAIN"; then
+    local r st=""
+    r="$(pick_route)" && st="$(ssh "${SSH_OPTS[@]}" "$r" "virsh --connect qemu:///system domstate $DOMAIN" 2>/dev/null)" || true
+    [ -z "$st" ] || die "'$DOMAIN' lives on the other host ($st); run 'nomad migrate' there"
+    die "'$DOMAIN' is not defined on this host and the other host could not be asked"
+  fi
+  case "$(vm_state "$DOMAIN")" in
+    running) log "'$DOMAIN' is already running here"; return 0 ;;
+    "shut off") ;;
+    *) die "'$DOMAIN' is $(vm_state "$DOMAIN"); resolve that first" ;;
+  esac
+  # A stale definition can remain here while the VM runs on the peer; starting it would corrupt the disk copy.
+  local r st
+  if r="$(pick_route)"; then
+    st="$(ssh "${SSH_OPTS[@]}" "$r" "virsh --connect qemu:///system domstate $DOMAIN" 2>/dev/null)" || st=""
+    case "$st" in running|paused|"in shutdown") die "'$DOMAIN' is $st on the other host; refusing to start a second copy" ;; esac
+  else
+    [ "${FORCE:-0}" = 1 ] || die "other host unreachable, can't rule out a running copy there; set FORCE=1 to start anyway"
+  fi
+  virsh start "$DOMAIN"
+}
+
+cmd_migrate() {
+  local inflate="$AUTO_INFLATE" route="" args=(--progress) a
+  while [ $# -gt 0 ]; do
+    a="$1"; shift
+    case "$a" in
+      --inflate) inflate=1 ;;
+      --no-inflate) inflate=0 ;;
+      --route) route="${1:?--route needs an ssh alias}"; shift ;;
+      --dry-run|--monitor|--monitor=[123]) args+=("$a") ;;
+      *) die "unknown option: $a" ;;
+    esac
+  done
+  need_cmd virsh ssh xmllint
+  [ "$(vm_state "$DOMAIN")" = running ] || die "'$DOMAIN' is not running on this host"
+  if [ -z "$route" ]; then
+    route="$(pick_route)" || { alert "No route to the other host (tried: $ROUTES)"; exit 1; }
+  fi
+  log "Using route $route"
+  local rc=0
+  "$SCRIPT_DIR/migrate.sh" "$route" "${args[@]}" || rc=$?
+  if [ "$rc" -ne 0 ]; then alert "Migration failed (exit $rc)"; exit "$rc"; fi
+  [[ " ${args[*]} " == *" --dry-run "* ]] && return 0
+  if [ "$ROLE" = weak ] && [ "$inflate" = 1 ]; then
+    log "Inflating on the other host"
+    ssh "${SSH_OPTS[@]}" "$route" '$HOME/.local/bin/nomad inflate' || warn "inflate failed; run 'nomad inflate' on the other host"
+  fi
+  log "Migration done: '$DOMAIN' now runs on the other host"
+  printf '\a'
+  ! command -v notify-send >/dev/null 2>&1 || notify-send "nomad" "Migration done" >/dev/null 2>&1 || true
+}
+
+case "${1:-}" in
+  start) cmd_start ;;
+  migrate) shift; cmd_migrate "$@" ;;
+  inflate|deflate|status) exec "$SCRIPT_DIR/inflate.sh" "$1" ;;
+  *) sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac
