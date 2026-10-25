@@ -44,7 +44,7 @@
 
 ## `nomad` command
 
-- [x] `scripts/nomad` (`start`, `migrate`, `inflate`, `deflate`, `status`) and `scripts/06-install-tools.sh`; route probing (eth then wifi), progress/ETA, stall alerts, auto-inflate on arrival (mock-tested only)
+- [x] `scripts/nomad` (`start`, `migrate`, `inflate`, `deflate`, `status`) and `scripts/06-install-tools.sh`; route probing (eth then wifi), progress/ETA, stall alerts, auto-inflate on arrival (`nomad migrate` and `06-install-tools.sh` verified on the real hosts)
 - [ ] Test on the real hosts: install on both, `nomad migrate` both ways (check ETA, stall alert, Ctrl-C abort, wifi fallback with the ethernet cable pulled), `nomad start`
 - [ ] `nomad migrate` and `nomad start` should open the VM monitor on the receiving/starting host (`virt-viewer --connect qemu:///system nomad`), later with multiple monitors (see the multi-monitor item above)
 
