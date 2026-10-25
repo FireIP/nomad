@@ -12,12 +12,13 @@
 #   inflate | deflate | status     resize the VM running on this host (see inflate.sh)
 # Config: ${NOMAD_CONFIG:-~/.config/nomad/config}: ROLE=strong|weak (this host), ROUTES="alias1 alias2" (ssh aliases of
 # the OTHER host in order of preference, e.g. ethernet first, then wifi), AUTO_INFLATE=1|0, STALL_SECS (60),
-# VIEWER=1|0 (open the console automatically), VIEWER_CMD=virt-viewer|virt-manager.
+# VIEWER=1|0 (open the console automatically), VIEWER_CMD=virt-viewer|virt-manager,
+# VIEWER_SOURCE=1 also opens a viewer here on the peer after migrating (SPICE is single-client, so it disconnects the new host's viewer).
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.sh"
 
 CONFIG="${NOMAD_CONFIG:-$HOME/.config/nomad/config}"
 [ -r "$CONFIG" ] || die "no config at $CONFIG; run scripts/06-install-tools.sh"
-ROLE="" ROUTES="" AUTO_INFLATE=1 VIEWER=1 VIEWER_CMD=virt-viewer
+ROLE="" ROUTES="" AUTO_INFLATE=1 VIEWER=1 VIEWER_CMD=virt-viewer VIEWER_SOURCE=0
 source "$CONFIG"
 [ "$ROLE" = strong ] || [ "$ROLE" = weak ] || die "ROLE in $CONFIG must be 'strong' or 'weak'"
 [ -n "$ROUTES" ] || die "ROUTES in $CONFIG is empty"
@@ -105,7 +106,8 @@ cmd_migrate() {
   fi
   if [ "$viewer" = 1 ]; then
     ssh "${SSH_OPTS[@]}" "$route" '$HOME/.local/bin/nomad viewer' || warn "could not open the viewer on the other host"
-    open_viewer "qemu+ssh://$route/system"
+    # SPICE accepts one client at a time: a second viewer would kick the one on the new host
+    [ "${VIEWER_SOURCE:-0}" != 1 ] || open_viewer "qemu+ssh://$route/system"
   fi
   log "Migration done: '$DOMAIN' now runs on the other host"
   printf '\a'
