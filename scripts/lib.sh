@@ -161,3 +161,24 @@ run_with_progress() {
   log "Migration command ran for $(fmt_dur $((SECONDS - start)))"
   return "$rc"
 }
+
+# Open a graphical console for $DOMAIN on libvirt URI $1 (default qemu:///system), detached from the terminal.
+# Works from a plain ssh shell by borrowing the GUI session's environment. Never fails the caller.
+# VIEWER_CMD: virt-viewer (default) or virt-manager.
+open_viewer() {
+  local uri="${1:-qemu:///system}" cmd="${VIEWER_CMD:-virt-viewer}" rt sock
+  command -v "$cmd" >/dev/null 2>&1 || { warn "$cmd not installed; skipping the viewer"; return 0; }
+  rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if [ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
+    sock="$(ls "$rt"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -n1)" || true
+    if [ -n "$sock" ]; then export WAYLAND_DISPLAY="${sock##*/}" XDG_RUNTIME_DIR="$rt"
+    elif [ -S /tmp/.X11-unix/X0 ]; then export DISPLAY=:0
+    else warn "no graphical session found; skipping the viewer"; return 0; fi
+  fi
+  case "$cmd" in
+    virt-manager) set -- "$cmd" --connect "$uri" --show-domain-console "$DOMAIN" ;;
+    *) set -- "$cmd" --connect "$uri" --reconnect "$DOMAIN" ;;
+  esac
+  setsid "$@" >/dev/null 2>&1 </dev/null &
+  log "Opened $cmd on $uri"
+}

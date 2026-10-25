@@ -7,18 +7,21 @@
 #       --route ALIAS              use this ssh alias instead of probing the configured routes
 #       --dry-run                  checks only
 #       --monitor[=1|2|3]          also write the detailed debug log (see migrate.sh)
+#   viewer                     open the VM console (here if it runs here, else on the other host over qemu+ssh)
+#   start/migrate also take --viewer | --no-viewer (default: VIEWER from the config)
 #   inflate | deflate | status     resize the VM running on this host (see inflate.sh)
 # Config: ${NOMAD_CONFIG:-~/.config/nomad/config}: ROLE=strong|weak (this host), ROUTES="alias1 alias2" (ssh aliases of
-# the OTHER host in order of preference, e.g. ethernet first, then wifi), AUTO_INFLATE=1|0, STALL_SECS (60).
+# the OTHER host in order of preference, e.g. ethernet first, then wifi), AUTO_INFLATE=1|0, STALL_SECS (60),
+# VIEWER=1|0 (open the console automatically), VIEWER_CMD=virt-viewer|virt-manager.
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.sh"
 
 CONFIG="${NOMAD_CONFIG:-$HOME/.config/nomad/config}"
 [ -r "$CONFIG" ] || die "no config at $CONFIG; run scripts/06-install-tools.sh"
-ROLE="" ROUTES="" AUTO_INFLATE=1
+ROLE="" ROUTES="" AUTO_INFLATE=1 VIEWER=1 VIEWER_CMD=virt-viewer
 source "$CONFIG"
 [ "$ROLE" = strong ] || [ "$ROLE" = weak ] || die "ROLE in $CONFIG must be 'strong' or 'weak'"
 [ -n "$ROUTES" ] || die "ROUTES in $CONFIG is empty"
-export STALL_SECS="${STALL_SECS:-60}"
+export STALL_SECS="${STALL_SECS:-60}" VIEWER_CMD
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=3)
 
 # First configured route whose ssh works (ethernet is listed before wifi); prints the alias.
@@ -32,6 +35,15 @@ pick_route() {
 }
 
 cmd_start() {
+  local viewer=$VIEWER
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --viewer) viewer=1 ;;
+      --no-viewer) viewer=0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+    shift
+  done
   need_cmd virsh ssh
   if ! vm_exists "$DOMAIN"; then
     local r st=""
@@ -40,7 +52,7 @@ cmd_start() {
     die "'$DOMAIN' is not defined on this host and the other host could not be asked"
   fi
   case "$(vm_state "$DOMAIN")" in
-    running) log "'$DOMAIN' is already running here"; return 0 ;;
+    running) log "'$DOMAIN' is already running here"; [ "$viewer" != 1 ] || open_viewer; return 0 ;;
     "shut off") ;;
     *) die "'$DOMAIN' is $(vm_state "$DOMAIN"); resolve that first" ;;
   esac
@@ -53,15 +65,25 @@ cmd_start() {
     [ "${FORCE:-0}" = 1 ] || die "other host unreachable, can't rule out a running copy there; set FORCE=1 to start anyway"
   fi
   virsh start "$DOMAIN"
+  [ "$viewer" != 1 ] || open_viewer
+}
+
+cmd_viewer() {
+  if [ "$(vm_state "$DOMAIN")" = running ]; then open_viewer; return; fi
+  local r
+  r="$(pick_route)" || die "'$DOMAIN' is not running here and the other host is unreachable"
+  open_viewer "qemu+ssh://$r/system"
 }
 
 cmd_migrate() {
-  local inflate="$AUTO_INFLATE" route="" args=(--progress) a
+  local inflate="$AUTO_INFLATE" viewer=$VIEWER route="" args=(--progress) a
   while [ $# -gt 0 ]; do
     a="$1"; shift
     case "$a" in
       --inflate) inflate=1 ;;
       --no-inflate) inflate=0 ;;
+      --viewer) viewer=1 ;;
+      --no-viewer) viewer=0 ;;
       --route) route="${1:?--route needs an ssh alias}"; shift ;;
       --dry-run|--monitor|--monitor=[123]) args+=("$a") ;;
       *) die "unknown option: $a" ;;
@@ -81,13 +103,18 @@ cmd_migrate() {
     log "Inflating on the other host"
     ssh "${SSH_OPTS[@]}" "$route" '$HOME/.local/bin/nomad inflate' || warn "inflate failed; run 'nomad inflate' on the other host"
   fi
+  if [ "$viewer" = 1 ]; then
+    ssh "${SSH_OPTS[@]}" "$route" '$HOME/.local/bin/nomad viewer' || warn "could not open the viewer on the other host"
+    open_viewer "qemu+ssh://$route/system"
+  fi
   log "Migration done: '$DOMAIN' now runs on the other host"
   printf '\a'
   ! command -v notify-send >/dev/null 2>&1 || notify-send "nomad" "Migration done" >/dev/null 2>&1 || true
 }
 
 case "${1:-}" in
-  start) cmd_start ;;
+  start) shift; cmd_start "$@" ;;
+  viewer) cmd_viewer ;;
   migrate) shift; cmd_migrate "$@" ;;
   inflate|deflate|status) exec "$SCRIPT_DIR/inflate.sh" "$1" ;;
   *) sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
