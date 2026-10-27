@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
 # Daily-driver wrapper around the other scripts. Install with scripts/06-install-tools.sh.
 # Usage: nomad <command>
-#   start                      start the VM here (refuses if it is defined/running on the other host)
+#   start [--yes]              start the VM here; refuses if it runs on the other host. If the other host is
+#                              unreachable it only starts when the location record says the VM lives here, after a
+#                              y/N prompt (--yes skips the prompt, e.g. without a terminal)
 #   migrate [options]          hand the running VM over to the other host, with progress and alerts
 #       --inflate | --no-inflate   inflate on arrival at the strong host (default: AUTO_INFLATE from the config)
 #       --route ALIAS              use this ssh alias instead of probing the configured routes
 #       --dry-run                  checks only
 #       --monitor[=1|2|3]          also write the detailed debug log (see migrate.sh)
+#   where                      where the VM lives: location record and libvirt state on both hosts
+#   takeover                   the other host is unreachable for good: re-define and start the VM here from the stale
+#                              local disk (you type the domain name to confirm; what the VM did there since is lost)
 #   viewer                     open the VM console (here if it runs here, else on the other host over qemu+ssh)
-#   start/migrate also take --viewer | --no-viewer (default: VIEWER from the config)
-#   inflate | deflate | status     resize the VM running on this host (see inflate.sh)
+#   start/takeover/migrate also take --viewer | --no-viewer (default: VIEWER from the config)
+#   inflate | deflate | status     resize the VM running on this host (see inflate.sh); status shows the location
+#                                  record when the VM isn't running here
 # Config: ${NOMAD_CONFIG:-~/.config/nomad/config}: ROLE=strong|weak (this host), ROUTES="alias1 alias2" (ssh aliases of
 # the OTHER host in order of preference, e.g. ethernet first, then wifi), AUTO_INFLATE=1|0, STALL_SECS (60),
 # VIEWER=1|0 (open the console automatically), VIEWER_CMD=virt-viewer|virt-manager,
 # VIEWER_SOURCE=1 also opens a viewer here on the peer after migrating (SPICE is single-client, so it disconnects the new host's viewer).
+# State: ${NOMAD_STATE_DIR:-~/.local/state/nomad}: location (which host owns the VM, kept in sync on both hosts by
+# start/migrate/where) and domain.xml (the VM definition, saved on start/migrate for takeover).
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.sh"
 
 CONFIG="${NOMAD_CONFIG:-$HOME/.config/nomad/config}"
@@ -24,6 +32,11 @@ source "$CONFIG"
 [ -n "$ROUTES" ] || die "ROUTES in $CONFIG is empty"
 export STALL_SECS="${STALL_SECS:-60}" VIEWER_CMD
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=3)
+OTHER_ROLE=weak; [ "$ROLE" = strong ] || OTHER_ROLE=strong
+STATE_DIR="${NOMAD_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/nomad}"
+RECORD="$STATE_DIR/location"
+SAVED_XML="$STATE_DIR/domain.xml"
+PEER_NOMAD='$HOME/.local/bin/nomad'   # expanded by the peer's shell
 
 # First configured route whose ssh works (ethernet is listed before wifi); prints the alias.
 pick_route() {
@@ -35,8 +48,232 @@ pick_route() {
   return 1
 }
 
+is_active()  { case "$1" in running|paused|"in shutdown"|pmsuspended) return 0 ;; esac; return 1; }
+state_here() { vm_state "$DOMAIN" || true; }
+peer_state() { local s; s="$(ssh "${SSH_OPTS[@]}" "$1" "virsh --connect qemu:///system domstate $DOMAIN" 2>/dev/null)" || s=""; printf '%s' "${s//$'\n'/}"; }
+now()        { date -Is; }
+
+# --- Location record: which host owns the VM (its live definition and current disk) ---------------------------
+# Lines OWNER=strong|weak, OWNER_HOST, GEN (bumped on every change of owner), SINCE, EVENT. Kept on both hosts.
+
+# parse_record <prefix>: reads a record on stdin into <prefix>_OWNER/_HOST/_GEN/_SINCE/_EVENT and sets
+# <prefix>_KNOWN=1 when it names a valid owner. The file is parsed, never sourced.
+parse_record() {
+  local p="$1" k v owner="" host="" gen=0 since="" event=""
+  while IFS='=' read -r k v; do
+    case "$k" in
+      OWNER) owner="$v" ;; OWNER_HOST) host="$v" ;; GEN) gen="$v" ;; SINCE) since="$v" ;; EVENT) event="$v" ;;
+    esac
+  done
+  [ "$owner" = strong ] || [ "$owner" = weak ] || owner=""
+  [[ "$gen" =~ ^[0-9]+$ ]] || gen=0
+  printf -v "${p}_OWNER" '%s' "$owner"; printf -v "${p}_HOST" '%s' "$host"; printf -v "${p}_GEN" '%s' "$gen"
+  printf -v "${p}_SINCE" '%s' "$since"; printf -v "${p}_EVENT" '%s' "$event"
+  printf -v "${p}_KNOWN" '%s' "$([ -n "$owner" ] && echo 1 || echo 0)"
+}
+read_local() { if [ -r "$RECORD" ]; then parse_record L <"$RECORD"; else parse_record L </dev/null; fi; }
+
+# write_local <owner> <gen> <event> <since> <host>: atomic replace.
+write_local() {
+  local tmp
+  mkdir -p "$STATE_DIR"
+  tmp="$(mktemp "$STATE_DIR/.location.XXXXXX")"
+  printf '# nomad location record (scripts/nomad); compare with `nomad where`\nOWNER=%s\nOWNER_HOST=%s\nGEN=%s\nSINCE=%s\nEVENT=%s\n' \
+    "$1" "$5" "$2" "$4" "$3" >"$tmp"
+  mv -f "$tmp" "$RECORD"
+}
+
+# Local record, or a guess from libvirt when there is none (or a migration never finished): defined here = owner here.
+local_view() {
+  read_local
+  L_INFERRED=0
+  if [ "$L_KNOWN" != 1 ] || [ "$L_EVENT" = migrating ]; then
+    L_INFERRED=1
+    if vm_exists "$DOMAIN"; then L_OWNER=$ROLE; else L_OWNER=$OTHER_ROLE; fi
+  fi
+}
+
+who() { # who <role> [host]
+  local w="the other host"
+  [ "$1" != "$ROLE" ] || w="this host"
+  echo "$w ($1${2:+, $2})"
+}
+describe_local() {
+  if [ "$L_INFERRED" = 1 ]; then
+    echo "$(who "$L_OWNER") [no usable record; guessed from libvirt: '$DOMAIN' is $(vm_exists "$DOMAIN" || echo "not ")defined here]"
+  else
+    echo "$(who "$L_OWNER" "$L_HOST") since ${L_SINCE:-?} (gen $L_GEN, $L_EVENT)"
+  fi
+}
+
+peer_read() { # sets P_* and P_OK=1 when the peer's nomad answered
+  local out
+  if out="$(ssh "${SSH_OPTS[@]}" "$1" "$PEER_NOMAD _record get" 2>/dev/null)"; then P_OK=1; else P_OK=0; out=""; fi
+  parse_record P <<<"$out"
+}
+
+# store_record <owner> <gen> <event> <since> <host> [route]: write here and, with a route, on the other host too.
+store_record() {
+  local owner="$1" gen="$2" event="$3" since="$4" host="$5" route="${6:-}" out
+  [ "$owner" != "$ROLE" ] || host="$(uname -n)"
+  if [ -n "$route" ]; then
+    if out="$(ssh "${SSH_OPTS[@]}" "$route" "$PEER_NOMAD _record set $owner $gen $event $since ${host:--}" 2>/dev/null)"; then
+      parse_record S <<<"$out"
+      [ "$owner" = "$ROLE" ] || host="${S_HOST:-$host}"
+    else
+      warn "could not update the location record on the other host ($route); is the updated nomad installed there?"
+    fi
+  fi
+  write_local "$owner" "$gen" "$event" "$since" "$host"
+}
+
+# claim_here <event> [route]: record this host as the owner (no-op when it already is).
+claim_here() {
+  read_local
+  if [ "$L_KNOWN" = 1 ] && [ "$L_OWNER" = "$ROLE" ] && [ "$L_EVENT" != migrating ]; then return 0; fi
+  store_record "$ROLE" "$((L_GEN + 1))" "$1" "$(now)" "" "${2:-}"
+}
+
+save_xml() {
+  local tmp
+  mkdir -p "$STATE_DIR"
+  tmp="$(mktemp "$STATE_DIR/.domain.XXXXXX")"
+  if virsh dumpxml --inactive --security-info "$DOMAIN" >"$tmp" 2>/dev/null; then mv -f "$tmp" "$SAVED_XML"
+  else rm -f "$tmp"; warn "could not save the definition of '$DOMAIN' to $SAVED_XML"; fi
+}
+
+# reconcile <route>: with the other host reachable, compare both records with what libvirt shows on both hosts,
+# agree on the owner (W_OWNER, empty if the VM is known nowhere) and fix stale records on either side.
+# Live libvirt state wins when it is unambiguous. Returns 1 (after an alert) on a conflict a human must resolve.
+reconcile() {
+  local r="$1" lst pst live="" gen
+  W_OWNER="" W_GEN=0 W_EVENT="" W_SINCE="" W_HOST=""
+  read_local
+  peer_read "$r"
+  [ "$P_OK" = 1 ] || warn "could not read the location record on the other host ($r); is the updated nomad installed there?"
+  lst="$(state_here)"; pst="$(peer_state "$r")"; PEER_STATE="$pst"
+  if { [ "$L_EVENT" = migrating ] || [ "$P_EVENT" = migrating ]; } && is_active "$lst" && is_active "$pst"; then
+    log "A migration seems to be in progress (here: $lst, other host: $pst)"
+    W_OWNER="$L_OWNER" W_GEN="$L_GEN" W_EVENT=migrating W_SINCE="$L_SINCE" W_HOST="$L_HOST"
+    return 0
+  fi
+  [ "$L_EVENT" != migrating ] || L_KNOWN=0
+  [ "$P_EVENT" != migrating ] || P_KNOWN=0
+  if is_active "$lst" && is_active "$pst"; then
+    alert "'$DOMAIN' is $lst here AND $pst on the other host: two copies are running. Shut down the one you don't want, then undefine it there with 'virsh undefine $DOMAIN --keep-nvram' (keep its disk until you're sure)"
+    return 1
+  fi
+  if [ -n "$lst" ] && [ -n "$pst" ] && [ "$L_KNOWN" = 1 ] && [ "$P_KNOWN" = 1 ] && [ "$L_OWNER" != "$P_OWNER" ]; then
+    alert "The hosts disagree where '$DOMAIN' lives (here: $L_OWNER gen $L_GEN $L_EVENT, other host: $P_OWNER gen $P_GEN $P_EVENT) and both have it defined, e.g. after a takeover: the copies have diverged. Decide which copy to keep, then on the OTHER host run 'virsh undefine $DOMAIN --keep-nvram' (keep its disk until you're sure)"
+    return 1
+  fi
+  if [ "$L_KNOWN" = 1 ] && { [ "$P_KNOWN" != 1 ] || [ "$L_GEN" -gt "$P_GEN" ] || { [ "$L_GEN" -eq "$P_GEN" ] && [ "$L_OWNER" = "$P_OWNER" ]; }; }; then
+    W_OWNER="$L_OWNER" W_GEN="$L_GEN" W_EVENT="$L_EVENT" W_SINCE="$L_SINCE" W_HOST="$L_HOST"
+  elif [ "$P_KNOWN" = 1 ] && { [ "$L_KNOWN" != 1 ] || [ "$P_GEN" -gt "$L_GEN" ]; }; then
+    W_OWNER="$P_OWNER" W_GEN="$P_GEN" W_EVENT="$P_EVENT" W_SINCE="$P_SINCE" W_HOST="$P_HOST"
+  fi
+  if is_active "$lst"; then live=$ROLE
+  elif is_active "$pst"; then live=$OTHER_ROLE
+  elif [ -n "$lst" ] && [ -z "$pst" ]; then live=$ROLE
+  elif [ -z "$lst" ] && [ -n "$pst" ]; then live=$OTHER_ROLE
+  fi
+  gen=$((L_GEN > P_GEN ? L_GEN : P_GEN))
+  if [ -n "$live" ] && [ "$live" != "$W_OWNER" ]; then
+    if [ -n "$W_OWNER" ]; then
+      warn "the location record said $(who "$W_OWNER"), but libvirt shows '$DOMAIN' on $(who "$live"); updating the record"
+      W_EVENT=repaired
+    else
+      W_EVENT=inferred
+    fi
+    W_OWNER=$live W_GEN=$((gen + 1)) W_SINCE="$(now)" W_HOST=""
+  fi
+  if [ -z "$W_OWNER" ]; then
+    if [ "$L_KNOWN" = 1 ] && [ "$P_KNOWN" = 1 ]; then
+      alert "The location records conflict (here: $L_OWNER gen $L_GEN, other host: $P_OWNER gen $P_GEN) and libvirt can't tell. Remove the wrong one: $RECORD here or the same file there"
+      return 1
+    fi
+    return 0
+  fi
+  if [ "$L_KNOWN" != 1 ] || [ "$L_OWNER" != "$W_OWNER" ] || [ "$L_GEN" != "$W_GEN" ] \
+     || { [ "$P_OK" = 1 ] && { [ "$P_KNOWN" != 1 ] || [ "$P_OWNER" != "$W_OWNER" ] || [ "$P_GEN" != "$W_GEN" ]; }; }; then
+    store_record "$W_OWNER" "$W_GEN" "$W_EVENT" "${W_SINCE:-$(now)}" "$W_HOST" "$([ "$P_OK" != 1 ] || echo "$r")"
+    read_local
+    W_HOST="$L_HOST"
+  fi
+  return 0
+}
+
+# confirm <prompt>: y/N on the terminal; fails when there is no terminal.
+confirm() {
+  local a=""
+  { : </dev/tty; } 2>/dev/null || return 1
+  read -r -p "$1 [y/N] " a </dev/tty || true
+  [[ "$a" =~ ^[Yy] ]]
+}
+
+cmd_record() { # internal: the other host reads/writes this host's record over ssh
+  case "${1:-}" in
+    get) [ ! -r "$RECORD" ] || cat "$RECORD" ;;
+    set)
+      [ $# -eq 6 ] || die "usage: nomad _record set OWNER GEN EVENT SINCE HOST"
+      [ "$2" = strong ] || [ "$2" = weak ] || die "bad owner: $2"
+      [[ "$3" =~ ^[0-9]+$ ]] && [[ "$4" =~ ^[a-z]+$ ]] && [[ "$5" =~ ^[0-9T:+-]+$ ]] && [[ "$6" =~ ^[A-Za-z0-9._-]+$ ]] \
+        || die "bad record values"
+      local host="$6"
+      [ "$host" != - ] || host=""
+      [ "$2" != "$ROLE" ] || host="$(uname -n)"
+      write_local "$2" "$3" "$4" "$5" "$host"
+      cat "$RECORD" ;;
+    *) die "usage: nomad _record get|set ..." ;;
+  esac
+}
+
 cmd_start() {
-  local viewer=$VIEWER
+  local viewer=$VIEWER yes=0 r="" st
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --viewer) viewer=1 ;;
+      --no-viewer) viewer=0 ;;
+      --yes|-y) yes=1 ;;
+      *) die "unknown option: $1" ;;
+    esac
+    shift
+  done
+  need_cmd virsh ssh
+  if r="$(pick_route)"; then
+    reconcile "$r" || die "not starting; see above and 'nomad where'"
+    st="$PEER_STATE"
+    ! is_active "$st" || die "'$DOMAIN' is $st on the other host; refusing to start a second copy (use 'nomad viewer', or 'nomad migrate' there)"
+    if ! vm_exists "$DOMAIN"; then
+      [ -z "$st" ] || die "'$DOMAIN' lives on the other host ($st); start it there and run 'nomad migrate'"
+      die "'$DOMAIN' is defined on neither host"
+    fi
+    # A stale definition can remain here (e.g. after a takeover there); starting it would fork the disk.
+    [ -z "$W_OWNER" ] || [ "$W_OWNER" = "$ROLE" ] \
+      || die "'$DOMAIN' lives on the other host (${st:-not defined} there); the copy here is stale. Start it there and run 'nomad migrate'"
+  else
+    r=""
+    local_view
+    [ "$L_OWNER" = "$ROLE" ] || die "the other host is unreachable and '$DOMAIN' lives there: $(describe_local). The copy here is stale; if that host is gone for good, run 'nomad takeover'"
+    vm_exists "$DOMAIN" || die "the location record says '$DOMAIN' lives here, but it is not defined here; 'nomad takeover' re-defines it from $SAVED_XML"
+    if [ "$(state_here)" != running ]; then
+      log "The other host is unreachable (tried: $ROUTES). '$DOMAIN' lives on $(describe_local)"
+      [ "$yes" = 1 ] || confirm "Start '$DOMAIN' here?" || die "not started (answer y, or pass --yes when there is no terminal)"
+    fi
+  fi
+  case "$(state_here)" in
+    running) log "'$DOMAIN' is already running here"; claim_here start "$r"; [ "$viewer" != 1 ] || open_viewer; return 0 ;;
+    "shut off") ;;
+    *) die "'$DOMAIN' is $(state_here); resolve that first" ;;
+  esac
+  save_xml
+  virsh start "$DOMAIN"
+  claim_here start "$r"
+  [ "$viewer" != 1 ] || open_viewer
+}
+
+cmd_takeover() {
+  local viewer=$VIEWER r xml disks d nv a st
   while [ $# -gt 0 ]; do
     case "$1" in
       --viewer) viewer=1 ;;
@@ -45,39 +282,91 @@ cmd_start() {
     esac
     shift
   done
-  need_cmd virsh ssh
-  if ! vm_exists "$DOMAIN"; then
-    local r st=""
-    r="$(pick_route)" && st="$(ssh "${SSH_OPTS[@]}" "$r" "virsh --connect qemu:///system domstate $DOMAIN" 2>/dev/null)" || true
-    [ -z "$st" ] || die "'$DOMAIN' lives on the other host ($st); run 'nomad migrate' there"
-    die "'$DOMAIN' is not defined on this host and the other host could not be asked"
-  fi
-  case "$(vm_state "$DOMAIN")" in
-    running) log "'$DOMAIN' is already running here"; [ "$viewer" != 1 ] || open_viewer; return 0 ;;
-    "shut off") ;;
-    *) die "'$DOMAIN' is $(vm_state "$DOMAIN"); resolve that first" ;;
-  esac
-  # A stale definition can remain here while the VM runs on the peer; starting it would corrupt the disk copy.
-  local r st
+  need_cmd virsh ssh xmllint
   if r="$(pick_route)"; then
-    st="$(ssh "${SSH_OPTS[@]}" "$r" "virsh --connect qemu:///system domstate $DOMAIN" 2>/dev/null)" || st=""
-    case "$st" in running|paused|"in shutdown") die "'$DOMAIN' is $st on the other host; refusing to start a second copy" ;; esac
-  else
-    [ "${FORCE:-0}" = 1 ] || die "other host unreachable, can't rule out a running copy there; set FORCE=1 to start anyway"
+    die "the other host is reachable ($r), so no takeover is needed: see 'nomad where'. To move the VM, run 'nomad migrate' on the host where it runs (start it there first if it is shut off)"
   fi
+  local_view
+  st="$(state_here)"
+  if [ -n "$st" ]; then
+    [ "$L_OWNER" != "$ROLE" ] || die "'$DOMAIN' already lives here ($st); use 'nomad start'"
+    [ "$st" = "shut off" ] || die "'$DOMAIN' is $st here; resolve that first"
+    xml="$(virsh dumpxml --inactive "$DOMAIN")"
+  else
+    [ -r "$SAVED_XML" ] || die "'$DOMAIN' is not defined here and there is no saved definition at $SAVED_XML (it is saved by 'nomad start' and 'nomad migrate'); define it by hand with 'virsh define'"
+    xml="$(cat "$SAVED_XML")"
+  fi
+  disks="$(xmllint --xpath "//devices/disk[@device='disk']/source/@file" - <<<"$xml" 2>/dev/null | grep -o 'file="[^"]*"' | sed 's/^file="//; s/"$//')" || disks=""
+  nv="$(xmllint --xpath "string(//os/nvram)" - <<<"$xml" 2>/dev/null)" || nv=""
+  alert "TAKEOVER: start '$DOMAIN' here from the copy that stayed on this host"
+  echo "  Location record: $(describe_local)"
+  for d in $disks; do
+    if [ -e "$d" ]; then echo "  Disk $d, last written $(stat -c %y "$d" | cut -d. -f1)"
+    else warn "disk $d not found (or not readable by you); the start will fail if it is really missing"; fi
+  done
+  [ -z "$nv" ] || [ -e "$nv" ] || warn "NVRAM $nv not found; libvirt recreates it from the template (Secure Boot keys and boot entries reset)"
+  echo "  Everything the VM did on the other host since then is lost to this copy."
+  echo "  If the other host comes back with its copy, the two have diverged: nomad refuses to start or migrate"
+  echo "  until you undefine one of them ('virsh undefine $DOMAIN --keep-nvram' on that host)."
+  { : </dev/tty; } 2>/dev/null || die "takeover needs a terminal to confirm"
+  a=""
+  read -r -p "Type the domain name ($DOMAIN) to take over: " a </dev/tty || true
+  [ "$a" = "$DOMAIN" ] || die "aborted, nothing changed"
+  [ -n "$st" ] || virsh define "$SAVED_XML"
   virsh start "$DOMAIN"
+  store_record "$ROLE" "$((L_GEN + 1))" takeover "$(now)" ""
+  save_xml
+  log "'$DOMAIN' taken over; it now lives here"
   [ "$viewer" != 1 ] || open_viewer
 }
 
+cmd_where() {
+  need_cmd virsh ssh
+  local r lst rc=0
+  lst="$(state_here)"
+  echo "This host ($ROLE, $(uname -n)): ${lst:-not defined}"
+  if r="$(pick_route)"; then
+    reconcile "$r" || rc=1
+    echo "Other host (via $r): ${PEER_STATE:-not defined}"
+    if [ "$rc" -ne 0 ]; then
+      echo "Records: here $L_OWNER gen $L_GEN ${L_EVENT:-none}, other host $P_OWNER gen $P_GEN ${P_EVENT:-none}"
+      return 1
+    fi
+    if [ -z "$W_OWNER" ]; then echo "=> '$DOMAIN' is defined on neither host and there is no record"; return 0; fi
+    echo "Record (same on both hosts): $(who "$W_OWNER" "$W_HOST") since ${W_SINCE:-?} (gen $W_GEN, $W_EVENT)"
+    if [ "$W_OWNER" = "$ROLE" ]; then echo "=> '$DOMAIN' lives on this host: ${lst:-not defined}"
+    else echo "=> '$DOMAIN' lives on the other host: ${PEER_STATE:-not defined}"; fi
+    [ "$W_OWNER" = "$ROLE" ] || [ -z "$lst" ] || echo "   (stale definition here; it is overwritten by the next migration back)"
+  else
+    local_view
+    echo "Other host: unreachable (tried: $ROUTES)"
+    echo "Record here: $(describe_local)"
+    if [ "$L_OWNER" = "$ROLE" ]; then echo "=> '$DOMAIN' lives on this host: ${lst:-not defined}$([ "$lst" = running ] || echo "; 'nomad start' asks to start it")"
+    else echo "=> '$DOMAIN' lives on the other host, which is unreachable; 'nomad takeover' if it is gone for good"; fi
+  fi
+}
+
+cmd_status() {
+  [ "$(state_here)" != running ] || exec "$SCRIPT_DIR/inflate.sh" status
+  local_view
+  echo "'$DOMAIN' is $(state_here | sed 's/^$/not defined/') on this host"
+  echo "Location record: $(describe_local)"
+  echo "('nomad where' also asks the other host)"
+}
+
 cmd_viewer() {
-  if [ "$(vm_state "$DOMAIN")" = running ]; then open_viewer; return; fi
+  if [ "$(state_here)" = running ]; then open_viewer; return; fi
   local r
-  r="$(pick_route)" || die "'$DOMAIN' is not running here and the other host is unreachable"
-  open_viewer "qemu+ssh://$r/system"
+  if r="$(pick_route)"; then open_viewer "qemu+ssh://$r/system"; return; fi
+  local_view
+  if [ "$L_OWNER" = "$ROLE" ]; then
+    die "'$DOMAIN' is $(state_here | sed 's/^$/not defined/') here and the other host is unreachable; the location record says it lives here: run 'nomad start'"
+  fi
+  die "'$DOMAIN' lives on $(describe_local), which is unreachable (tried: $ROUTES)"
 }
 
 cmd_migrate() {
-  local inflate="$AUTO_INFLATE" viewer=$VIEWER route="" args=(--progress) a
+  local inflate="$AUTO_INFLATE" viewer=$VIEWER route="" args=(--progress) a dry=0
   while [ $# -gt 0 ]; do
     a="$1"; shift
     case "$a" in
@@ -86,26 +375,40 @@ cmd_migrate() {
       --viewer) viewer=1 ;;
       --no-viewer) viewer=0 ;;
       --route) route="${1:?--route needs an ssh alias}"; shift ;;
-      --dry-run|--monitor|--monitor=[123]) args+=("$a") ;;
+      --dry-run) dry=1; args+=("$a") ;;
+      --monitor|--monitor=[123]) args+=("$a") ;;
       *) die "unknown option: $a" ;;
     esac
   done
   need_cmd virsh ssh xmllint
-  [ "$(vm_state "$DOMAIN")" = running ] || die "'$DOMAIN' is not running on this host"
+  [ "$(state_here)" = running ] || die "'$DOMAIN' is not running on this host"
   if [ -z "$route" ]; then
     route="$(pick_route)" || { alert "No route to the other host (tried: $ROUTES)"; exit 1; }
   fi
   log "Using route $route"
+  reconcile "$route" || { alert "Not migrating: resolve the conflict above first (see 'nomad where')"; exit 1; }
+  read_local
+  if [ "$dry" != 1 ]; then
+    save_xml
+    write_local "$L_OWNER" "$L_GEN" migrating "$L_SINCE" "$L_HOST"
+  fi
   local rc=0
   "$SCRIPT_DIR/migrate.sh" "$route" "${args[@]}" || rc=$?
-  if [ "$rc" -ne 0 ]; then alert "Migration failed (exit $rc)"; exit "$rc"; fi
-  [[ " ${args[*]} " == *" --dry-run "* ]] && return 0
+  if [ "$rc" -ne 0 ]; then
+    if [ "$dry" != 1 ]; then
+      if vm_exists "$DOMAIN"; then write_local "$L_OWNER" "$L_GEN" "$L_EVENT" "$L_SINCE" "$L_HOST"
+      else warn "'$DOMAIN' is no longer defined here although the migration failed; check 'nomad where'"; fi
+    fi
+    alert "Migration failed (exit $rc)"; exit "$rc"
+  fi
+  [ "$dry" != 1 ] || return 0
+  store_record "$OTHER_ROLE" "$((L_GEN + 1))" migrated "$(now)" "$route" "$route"
   if [ "$ROLE" = weak ] && [ "$inflate" = 1 ]; then
     log "Inflating on the other host"
-    ssh "${SSH_OPTS[@]}" "$route" '$HOME/.local/bin/nomad inflate' || warn "inflate failed; run 'nomad inflate' on the other host"
+    ssh "${SSH_OPTS[@]}" "$route" "$PEER_NOMAD inflate" || warn "inflate failed; run 'nomad inflate' on the other host"
   fi
   if [ "$viewer" = 1 ]; then
-    ssh "${SSH_OPTS[@]}" "$route" '$HOME/.local/bin/nomad viewer' || warn "could not open the viewer on the other host"
+    ssh "${SSH_OPTS[@]}" "$route" "$PEER_NOMAD viewer" || warn "could not open the viewer on the other host"
     # SPICE accepts one client at a time: a second viewer would kick the one on the new host
     [ "${VIEWER_SOURCE:-0}" != 1 ] || open_viewer "qemu+ssh://$route/system"
   fi
@@ -116,8 +419,12 @@ cmd_migrate() {
 
 case "${1:-}" in
   start) shift; cmd_start "$@" ;;
+  takeover) shift; cmd_takeover "$@" ;;
+  where) cmd_where ;;
   viewer) cmd_viewer ;;
   migrate) shift; cmd_migrate "$@" ;;
-  inflate|deflate|status) exec "$SCRIPT_DIR/inflate.sh" "$1" ;;
-  *) sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  status) cmd_status ;;
+  inflate|deflate) exec "$SCRIPT_DIR/inflate.sh" "$1" ;;
+  _record) shift; cmd_record "$@" ;;
+  *) awk 'NR > 1 { if (!/^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 1 ;;
 esac

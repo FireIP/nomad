@@ -33,7 +33,7 @@ The `scripts/` directory automates most of the steps below. They are idempotent 
 | `04-nfs.sh server\|fstab` | 3 (optional) | NUC |
 | `05-create-vm.sh create\|apply-baseline` | 4 | one host |
 | `06-install-tools.sh` | 7.1 | both |
-| `nomad start\|migrate\|inflate\|deflate\|status` | 7.1 | either host (the daily command, installed by `06-install-tools.sh`) |
+| `nomad start\|migrate\|where\|takeover\|viewer\|inflate\|deflate\|status` | 7.1 | either host (the daily command, installed by `06-install-tools.sh`) |
 | `migrate.sh <peer> [--dry-run] [--progress] [--monitor[=1\|2\|3]]` | 7 | the host currently running the VM (`--monitor` logs job stats to find slow phases: 1 = network + job info, 2 = + both hosts' load, 3 = + thread/socket detail) |
 
 ---
@@ -463,11 +463,17 @@ Both directions have been verified working (NUC → laptop and laptop → NUC). 
 | Command | What it does |
 |---|---|
 | `nomad migrate` | picks the first reachable route (ethernet before wifi), runs the pre-checks, deflates if needed, migrates with a live line (phase, disk %, RAM left, MiB/s, ETA), then runs `nomad inflate` on the other host if it is the strong one. Afterwards it opens the console on the other host (over ssh, in its graphical session). `VIEWER_SOURCE=1` in the config would also open one here via `qemu+ssh://<route>/system`, but SPICE allows a single client, so the two viewers fight (off by default). `--inflate` / `--no-inflate` override the default, `--route ALIAS` forces a route, `--dry-run` only checks |
-| `nomad start` | starts the VM here; refuses if the other host has a running copy (or can't be reached; `FORCE=1` overrides), then opens the console |
+| `nomad start` | starts the VM here, then opens the console. Refuses if the other host runs a copy, or if the location record (below) says the VM lives there and the copy here is stale. If the other host can't be reached, it starts only when the record says the VM lives here, after a `[y/N]` prompt (`--yes` skips it) |
+| `nomad where` | shows where the VM lives: libvirt state on both hosts and the location record, and fixes a record that libvirt contradicts. If the other host can't be reached it shows this host's record |
+| `nomad takeover` | for when the other host is gone for good (dead, stolen, away for a long time) while it owned the VM: re-defines the VM here from the saved definition and starts it from the stale local disk. You type the domain name to confirm. Everything the VM did on the other host since it left here is lost to this copy. It refuses while the other host is reachable |
 | `nomad viewer` | opens the console for the VM wherever it runs (here, else over `qemu+ssh` to the other host). `start` / `migrate` take `--viewer` / `--no-viewer`; the defaults are `VIEWER=1` and `VIEWER_CMD=virt-viewer` (or `virt-manager`) in `~/.config/nomad/config` |
-| `nomad inflate` / `deflate` / `status` | resize the VM running on this host (Phase 8) |
+| `nomad inflate` / `deflate` / `status` | resize the VM running on this host (Phase 8). When the VM isn't running here, `status` shows the location record |
 
 If no data moves for `STALL_SECS` (60) the terminal rings, a red message appears and `notify-send` shows a desktop notification; Ctrl-C asks whether to abort the migration. The ETA is approximate: RAM dirtying makes the remaining amount move. The raw `virsh migrate` command above still works and `migrate.sh <peer> --progress` is what `nomad migrate` calls.
+
+**Location record.** `nomad` keeps track of which host owns the VM (its live definition and current disk) in `~/.local/state/nomad/location` on both hosts: owner role and hostname, a generation number that grows with every change of owner, the time, and the last event (`migrated`, `start`, `takeover`, ...). `nomad migrate` updates it on both hosts once the migration succeeds; `nomad start` and `nomad where` sync it whenever the other host is reachable, and libvirt's live state wins if the two disagree. Without a record (first use, or a migration that was cut off) it is guessed from libvirt: defined here means it lives here. `~/.local/state/nomad/domain.xml` keeps the VM definition from the last start or migration, so `nomad takeover` can re-define it after `--undefinesource` removed it. Both hosts need the same version of the scripts: the record is read and written on the other host through `nomad` over ssh.
+
+After a takeover, if the other host comes back with its copy still defined, the two copies have diverged. `nomad start`, `migrate` and `where` then refuse with an alert until you pick one and run `virsh undefine nomad --keep-nvram` on the other host (keep its disk file until you're sure you don't need it).
 
 `--persistent` writes the domain config on the destination; `--undefinesource` removes it from wherever it just left, so the VM's definition always lives wherever the VM currently is.
 
@@ -549,4 +555,6 @@ If plain virtio-gpu feels sluggish and it bothers you enough to troubleshoot dri
 - **`TSC frequency mismatch ... TSC scaling unavailable` in the log** → expected when migrating to the laptop; the baseline drops `invtsc` so the guest uses `kvm-clock`. Verify with `cat /sys/devices/system/clocksource/clocksource0/current_clocksource` in the guest.
 - **Migration stalls for minutes, `virsh domjobinfo` times out, guest freezes** → check `ss -tin` on the source for `SYN-SENT` connections to the destination on ports 49152+, usually IPv6. Pin IPv4 with `--migrateuri tcp://<destination IPv4>` (Phase 7).
 - **Second live migration onward fails or behaves oddly with the disk** → check what's actually sitting at the destination path (Phase 7). A stale file from an earlier migration is normally overwritten without problems.
+- **`nomad start` refuses because the other host is unreachable** → it starts only where the location record puts the VM (Phase 7.1), after a `[y/N]` prompt (`--yes` without a terminal). If the record says the VM lives on the other host, the copy here is stale: bring that host back, or use `nomad takeover` if it is gone for good. `nomad where` shows what each host knows.
+- **`nomad` reports diverged copies or conflicting records** → both hosts have the VM defined and disagree who owns it, usually after a `nomad takeover`. Decide which copy to keep, run `virsh undefine nomad --keep-nvram` on the other host, then `nomad where` fixes the records.
 - **`virsh` commands don't show the VM or network you expect** → check `virsh uri`. If it prints `qemu:///session` instead of `qemu:///system`, you're quietly talking to the wrong libvirt instance — see Phase 1.4.

@@ -80,4 +80,4 @@ case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
   *) warn "~/.local/bin is not in PATH: bash: export PATH=\"\$HOME/.local/bin:\$PATH\"   fish: fish_add_path ~/.local/bin" ;;
 esac
-log "Try: nomad status"
+log "Try: nomad where"
