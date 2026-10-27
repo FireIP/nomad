@@ -191,6 +191,10 @@ reconcile() {
     alert "Could not verify '$DOMAIN' state on both hosts (here: ${lst:-not defined}, other host: ${pst:-not defined}); refusing to reconcile"
     return 1
   fi
+  if [ "$P_OK" != 1 ] && [ -n "$lst" ] && [ -n "$pst" ]; then
+    alert "Could not read the location record on the other host ($r) while '$DOMAIN' is defined on both hosts; refusing to reconcile"
+    return 1
+  fi
   if { [ "$L_EVENT" = migrating ] || [ "$P_EVENT" = migrating ]; } && is_active "$lst" && is_active "$pst"; then
     log "A migration seems to be in progress (here: $lst, other host: $pst)"
     W_OWNER="$L_OWNER" W_GEN="$L_GEN" W_EVENT=migrating W_SINCE="$L_SINCE" W_HOST="$L_HOST"
