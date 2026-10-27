@@ -50,8 +50,23 @@ pick_route() {
 }
 
 is_active()  { case "$1" in running|paused|"in shutdown"|pmsuspended) return 0 ;; esac; return 1; }
-state_here() { vm_state "$DOMAIN" || true; }
-peer_state() { local s; s="$(ssh "${SSH_OPTS[@]}" "$1" "virsh --connect qemu:///system domstate $DOMAIN" 2>/dev/null)" || s=""; printf '%s' "${s//$'\n'/}"; }
+state_here() {
+  local domains state
+  if ! domains="$(virsh list --all --name 2>/dev/null)"; then printf unknown; return; fi
+  if ! grep -Fxq -- "$DOMAIN" <<<"$domains"; then return 0; fi
+  if state="$(vm_state "$DOMAIN")"; then printf '%s' "$state"; else printf unknown; fi
+}
+peer_state() {
+  local domain out remote
+  printf -v domain '%q' "$DOMAIN"
+  remote="names=\$(virsh --connect qemu:///system list --all --name) || exit 1; if printf '%s\\n' \"\$names\" | grep -Fxq -- $domain; then virsh --connect qemu:///system domstate $domain || exit 1; else printf '__NOMAD_NOT_DEFINED__'; fi"
+  if out="$(ssh "${SSH_OPTS[@]}" "$1" "$remote" 2>/dev/null)"; then
+    [ "$out" != __NOMAD_NOT_DEFINED__ ] || return 0
+    printf '%s' "${out//$'\n'/}"
+  else
+    printf unknown
+  fi
+}
 now()        { date -Is; }
 
 migration_lock() {
@@ -93,10 +108,14 @@ write_local() {
 # Local record, or a guess from libvirt when there is none (or a migration never finished): defined here = owner here.
 local_view() {
   read_local
-  L_INFERRED=0
+  L_INFERRED=0 L_UNKNOWN=0
   if [ "$L_KNOWN" != 1 ] || [ "$L_EVENT" = migrating ]; then
     L_INFERRED=1
-    if vm_exists "$DOMAIN"; then L_OWNER=$ROLE; else L_OWNER=$OTHER_ROLE; fi
+    local state
+    state="$(state_here)"
+    if [ "$state" = unknown ]; then L_UNKNOWN=1; L_OWNER=""
+    elif [ -n "$state" ]; then L_OWNER=$ROLE
+    else L_OWNER=$OTHER_ROLE; fi
   fi
 }
 
@@ -107,7 +126,8 @@ who() { # who <role> [host]
 }
 describe_local() {
   if [ "$L_INFERRED" = 1 ]; then
-    echo "$(who "$L_OWNER") [no usable record; guessed from libvirt: '$DOMAIN' is $(vm_exists "$DOMAIN" || echo "not ")defined here]"
+    if [ "$L_UNKNOWN" = 1 ]; then echo "[no usable record; could not verify '$DOMAIN' state here]"
+    else echo "$(who "$L_OWNER") [no usable record; guessed from libvirt: '$DOMAIN' is $([ "$L_OWNER" = "$ROLE" ] && echo defined || echo "not defined") here]"; fi
   else
     echo "$(who "$L_OWNER" "$L_HOST") since ${L_SINCE:-?} (gen $L_GEN, $L_EVENT)"
   fi
@@ -159,6 +179,10 @@ reconcile() {
   peer_read "$r"
   [ "$P_OK" = 1 ] || warn "could not read the location record on the other host ($r); is the updated nomad installed there?"
   lst="$(state_here)"; pst="$(peer_state "$r")"; PEER_STATE="$pst"
+  if [ "$lst" = unknown ] || [ "$pst" = unknown ]; then
+    alert "Could not verify '$DOMAIN' state on both hosts (here: ${lst:-not defined}, other host: ${pst:-not defined}); refusing to reconcile"
+    return 1
+  fi
   if { [ "$L_EVENT" = migrating ] || [ "$P_EVENT" = migrating ]; } && is_active "$lst" && is_active "$pst"; then
     log "A migration seems to be in progress (here: $lst, other host: $pst)"
     W_OWNER="$L_OWNER" W_GEN="$L_GEN" W_EVENT=migrating W_SINCE="$L_SINCE" W_HOST="$L_HOST"
@@ -263,7 +287,10 @@ cmd_start() {
       || die "'$DOMAIN' lives on the other host (${st:-not defined} there); the copy here is stale. Start it there and run 'nomad migrate'"
   else
     r=""
+    st="$(state_here)"
+    [ "$st" != unknown ] || die "could not verify '$DOMAIN' state here; refusing to start"
     local_view
+    [ "$L_UNKNOWN" != 1 ] || die "could not verify '$DOMAIN' state here; refusing to start"
     [ "$L_OWNER" = "$ROLE" ] || die "the other host is unreachable and '$DOMAIN' lives there: $(describe_local). The copy here is stale; if that host is gone for good, run 'nomad takeover'"
     vm_exists "$DOMAIN" || die "the location record says '$DOMAIN' lives here, but it is not defined here; 'nomad takeover' re-defines it from $SAVED_XML"
     if [ "$(state_here)" != running ]; then
@@ -298,6 +325,7 @@ cmd_takeover() {
   fi
   local_view
   st="$(state_here)"
+  [ "$st" != unknown ] || die "could not verify '$DOMAIN' state here; refusing takeover"
   if [ -n "$st" ]; then
     [ "$L_OWNER" != "$ROLE" ] || die "'$DOMAIN' already lives here ($st); use 'nomad start'"
     [ "$st" = "shut off" ] || die "'$DOMAIN' is $st here; resolve that first"
@@ -356,6 +384,7 @@ cmd_where() {
     local_view
     echo "Other host: unreachable (tried: $ROUTES)"
     echo "Record here: $(describe_local)"
+    [ "$L_UNKNOWN" != 1 ] || { echo "=> could not verify '$DOMAIN' state here"; return 1; }
     if [ "$L_OWNER" = "$ROLE" ]; then echo "=> '$DOMAIN' lives on this host: ${lst:-not defined}$([ "$lst" = running ] || echo "; 'nomad start' asks to start it")"
     else echo "=> '$DOMAIN' lives on the other host, which is unreachable; 'nomad takeover' if it is gone for good"; fi
   fi
