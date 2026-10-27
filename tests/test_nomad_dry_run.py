@@ -53,6 +53,7 @@ if command == "ssh":
             raise SystemExit(1)
         raise SystemExit(0)
     env = os.environ.copy()
+    env.pop("DOMAIN", None)
     env.update(SIM_HOST=peer, HOME=str(root / peer / "home"))
     raise SystemExit(subprocess.run(["bash", "-c", remote], env=env).returncode)
 if command == "virsh":
@@ -61,11 +62,13 @@ if command == "virsh":
     if args[:3] == ["list", "--all", "--name"]:
         if host == "b" and os.environ.get("SIM_FAIL_PEER_STATE") == "1":
             raise SystemExit(1)
-        state = root / host / ("domstate" if domain == "nomad" else f"{domain}.domstate")
-        if state.exists():
-            print(domain)
+        if (root / host / "domstate").exists():
+            print("nomad")
+        for state in sorted((root / host).glob("*.domstate")):
+            print(state.name[:-len(".domstate")])
         raise SystemExit(0)
     if args[0] == "domstate":
+        domain = args[1]
         gate = root / "pause-domstate"
         started = root / "domstate.started"
         if host == "a" and gate.exists() and not started.exists():
