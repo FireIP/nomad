@@ -44,6 +44,23 @@ The XML files record host- and VM-specific details. Recompute the CPU baseline
 if either host changes, and keep the VM definition and its firmware variable
 store together when preserving or moving this VM configuration.
 
+## Script tests
+
+Run the same checks as GitHub Actions:
+
+```sh
+for script in scripts/*.sh scripts/nomad; do bash -n "$script" || break; done
+python3 -B -m unittest discover -s tests -v
+```
+
+The tests use Python's standard library and temporary, simulated hosts with
+stubbed `virsh`, `ssh`, migration and XML-query commands
+(`tests/stubs/host-command.py`). They cover offline starts (including terminal
+confirmation), ownership records, migration outcomes and locking, dry runs,
+takeover and conflicting copies, and non-default `DOMAIN` state, without
+contacting real hosts or using libvirt. They do not replace testing actual
+migration on both machines.
+
 ## License
 
 See [LICENSE](LICENSE).

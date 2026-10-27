@@ -44,6 +44,7 @@ RECORD="$STATE_DIR/location"
 SAVED_XML="$STATE_DIR/domain.xml"
 MIGRATION_LOCK="$STATE_DIR/migration.lock"
 PEER_NOMAD='$HOME/.local/bin/nomad'   # expanded by the peer's shell
+printf -v PEER_NOMAD 'DOMAIN=%q %s' "$DOMAIN" "$PEER_NOMAD"   # the peer acts on the same domain
 
 # First configured route whose ssh works (ethernet is listed before wifi); prints the alias.
 pick_route() {
@@ -146,19 +147,17 @@ describe_local() {
 }
 
 peer_read() { # sets P_* and P_OK=1 when the peer's nomad answered
-  local out domain
-  printf -v domain '%q' "$DOMAIN"
-  if out="$(ssh "${SSH_OPTS[@]}" "$1" "DOMAIN=$domain $PEER_NOMAD _record get" 2>/dev/null)"; then P_OK=1; else P_OK=0; out=""; fi
+  local out
+  if out="$(ssh "${SSH_OPTS[@]}" "$1" "$PEER_NOMAD _record get" 2>/dev/null)"; then P_OK=1; else P_OK=0; out=""; fi
   parse_record P <<<"$out"
 }
 
 # store_record <owner> <gen> <event> <since> <host> [route]: write here and, with a route, on the other host too.
 store_record() {
-  local owner="$1" gen="$2" event="$3" since="$4" host="$5" route="${6:-}" out domain
+  local owner="$1" gen="$2" event="$3" since="$4" host="$5" route="${6:-}" out
   [ "$owner" != "$ROLE" ] || host="$(uname -n)"
   if [ -n "$route" ]; then
-    printf -v domain '%q' "$DOMAIN"
-    if out="$(ssh "${SSH_OPTS[@]}" "$route" "DOMAIN=$domain $PEER_NOMAD _record set $owner $gen $event $since ${host:--}" 2>/dev/null)"; then
+    if out="$(ssh "${SSH_OPTS[@]}" "$route" "$PEER_NOMAD _record set $owner $gen $event $since ${host:--}" 2>/dev/null)"; then
       parse_record S <<<"$out"
       [ "$owner" = "$ROLE" ] || host="${S_HOST:-$host}"
     else
