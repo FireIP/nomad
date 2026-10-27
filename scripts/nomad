@@ -142,11 +142,11 @@ save_xml() {
   else rm -f "$tmp"; warn "could not save the definition of '$DOMAIN' to $SAVED_XML"; fi
 }
 
-# reconcile <route>: with the other host reachable, compare both records with what libvirt shows on both hosts,
-# agree on the owner (W_OWNER, empty if the VM is known nowhere) and fix stale records on either side.
+# reconcile <route> [--read-only]: with the other host reachable, compare both records with what libvirt shows on
+# both hosts, agree on the owner (W_OWNER, empty if the VM is known nowhere) and fix stale records on either side.
 # Live libvirt state wins when it is unambiguous. Returns 1 (after an alert) on a conflict a human must resolve.
 reconcile() {
-  local r="$1" lst pst live="" gen
+  local r="$1" read_only="${2:-}" lst pst live="" gen
   W_OWNER="" W_GEN=0 W_EVENT="" W_SINCE="" W_HOST=""
   read_local
   peer_read "$r"
@@ -194,6 +194,7 @@ reconcile() {
     fi
     return 0
   fi
+  [ "$read_only" = --read-only ] && return 0
   if [ "$L_KNOWN" != 1 ] || [ "$L_OWNER" != "$W_OWNER" ] || [ "$L_GEN" != "$W_GEN" ] \
      || { [ "$P_OK" = 1 ] && { [ "$P_KNOWN" != 1 ] || [ "$P_OWNER" != "$W_OWNER" ] || [ "$P_GEN" != "$W_GEN" ]; }; }; then
     store_record "$W_OWNER" "$W_GEN" "$W_EVENT" "${W_SINCE:-$(now)}" "$W_HOST" "$([ "$P_OK" != 1 ] || echo "$r")"
@@ -386,7 +387,11 @@ cmd_migrate() {
     route="$(pick_route)" || { alert "No route to the other host (tried: $ROUTES)"; exit 1; }
   fi
   log "Using route $route"
-  reconcile "$route" || { alert "Not migrating: resolve the conflict above first (see 'nomad where')"; exit 1; }
+  if [ "$dry" = 1 ]; then
+    reconcile "$route" --read-only || { alert "Not migrating: resolve the conflict above first (see 'nomad where')"; exit 1; }
+  else
+    reconcile "$route" || { alert "Not migrating: resolve the conflict above first (see 'nomad where')"; exit 1; }
+  fi
   read_local
   if [ "$dry" != 1 ]; then
     save_xml
