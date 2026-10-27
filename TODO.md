@@ -48,8 +48,8 @@
 - [x] Tested on the real hosts: `nomad migrate` both ways, `nomad start`, Ctrl-C abort, wifi fallback
 - [ ] Test the location record on the real hosts
   - [x] `nomad migrate` updates the record on both hosts (verified on the real hosts)
-  - [ ] `nomad where` on both hosts
-  - [ ] `nomad start` with the other host offline (prompt, `--yes`), and refusal when the record says the other host
+  - [x] `nomad where` on both hosts (verified on the real hosts)
+  - [x] `nomad start` with the other host offline (prompt, `--yes`), and refusal when the record says the other host (verified on the real hosts)
   - [ ] `nomad takeover` (throwaway: `DOMAIN=nomad-test`) and the diverged-copies alert when the other host comes back
 - [ ] Test the stall alert (no data for `STALL_SECS`: bell, red message, desktop notification)
 - [x] `nomad start` / `nomad migrate` open the console (`nomad viewer`, `VIEWER`/`VIEWER_CMD` in the config): locally on start, on the destination after migrate (a viewer on the source too is opt-in with `VIEWER_SOURCE=1`: SPICE is single-client, so two viewers disconnect/freeze each other). Tested on the real hosts: works
