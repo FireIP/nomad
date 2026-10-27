@@ -41,6 +41,9 @@ peer = "b" if host == "a" else "a"
 domain = os.environ.get("DOMAIN", "nomad")
 args = sys.argv[1:]
 command = Path(sys.argv[0]).name
+if command == "uname" and args == ["-n"]:
+    print(f"host-{host}")
+    raise SystemExit(0)
 if command == "ssh":
     while args and args[0] == "-o":
         args = args[2:]
