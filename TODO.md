@@ -24,7 +24,7 @@
 - [x] Scripts written in `scripts/` for Phases 1, 2, 3 (optional), 4 and 7
 - [x] Tested on both hosts: `00-preflight.sh <peer>`, `03-cpu-baseline.sh extract|baseline|verify`, `migrate.sh <peer> --dry-run`
 - [ ] Test `02-network.sh [peer]` on both hosts
-- [ ] Test a real `migrate.sh <peer>` in both directions
+- [x] Test a real `migrate.sh <peer>` in both directions
 - [x] Update guide Phase 2.4 to use `hypervisor-cpu-compare` (plain `cpu-compare` gave a false "incompatible")
 - [ ] (only if NFS gets set up) Set up NFS with `04-nfs.sh server`, test it, then add the `/mnt/bulk` mount in the guest
 - [x] Keep `collect-migration-info.sh` as a standalone debug helper
