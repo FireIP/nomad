@@ -21,7 +21,8 @@
 # VIEWER=1|0 (open the console automatically), VIEWER_CMD=virt-viewer|virt-manager,
 # VIEWER_SOURCE=1 also opens a viewer here on the peer after migrating (SPICE is single-client, so it disconnects the new host's viewer).
 # State: ${NOMAD_STATE_DIR:-~/.local/state/nomad}: location (which host owns the VM, kept in sync on both hosts by
-# start/migrate/where) and domain.xml (the VM definition, saved on start/migrate for takeover).
+# start/migrate/where) and domain.xml (the VM definition, saved on start/migrate for takeover). Non-default domains
+# keep their state in a subdirectory; the default 'nomad' keeps the existing paths.
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.sh"
 
 CONFIG="${NOMAD_CONFIG:-$HOME/.config/nomad/config}"
@@ -33,7 +34,12 @@ source "$CONFIG"
 export STALL_SECS="${STALL_SECS:-60}" VIEWER_CMD
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=3)
 OTHER_ROLE=weak; [ "$ROLE" = strong ] || OTHER_ROLE=strong
-STATE_DIR="${NOMAD_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/nomad}"
+STATE_ROOT="${NOMAD_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/nomad}"
+STATE_DIR="$STATE_ROOT"
+if [ "$DOMAIN" != nomad ]; then
+  case "$DOMAIN" in */*|.|..) die "DOMAIN cannot contain '/' or be '.' or '..'" ;; esac
+  STATE_DIR="$STATE_ROOT/$DOMAIN"
+fi
 RECORD="$STATE_DIR/location"
 SAVED_XML="$STATE_DIR/domain.xml"
 MIGRATION_LOCK="$STATE_DIR/migration.lock"
@@ -134,17 +140,19 @@ describe_local() {
 }
 
 peer_read() { # sets P_* and P_OK=1 when the peer's nomad answered
-  local out
-  if out="$(ssh "${SSH_OPTS[@]}" "$1" "$PEER_NOMAD _record get" 2>/dev/null)"; then P_OK=1; else P_OK=0; out=""; fi
+  local out domain
+  printf -v domain '%q' "$DOMAIN"
+  if out="$(ssh "${SSH_OPTS[@]}" "$1" "DOMAIN=$domain $PEER_NOMAD _record get" 2>/dev/null)"; then P_OK=1; else P_OK=0; out=""; fi
   parse_record P <<<"$out"
 }
 
 # store_record <owner> <gen> <event> <since> <host> [route]: write here and, with a route, on the other host too.
 store_record() {
-  local owner="$1" gen="$2" event="$3" since="$4" host="$5" route="${6:-}" out
+  local owner="$1" gen="$2" event="$3" since="$4" host="$5" route="${6:-}" out domain
   [ "$owner" != "$ROLE" ] || host="$(uname -n)"
   if [ -n "$route" ]; then
-    if out="$(ssh "${SSH_OPTS[@]}" "$route" "$PEER_NOMAD _record set $owner $gen $event $since ${host:--}" 2>/dev/null)"; then
+    printf -v domain '%q' "$DOMAIN"
+    if out="$(ssh "${SSH_OPTS[@]}" "$route" "DOMAIN=$domain $PEER_NOMAD _record set $owner $gen $event $since ${host:--}" 2>/dev/null)"; then
       parse_record S <<<"$out"
       [ "$owner" = "$ROLE" ] || host="${S_HOST:-$host}"
     else
@@ -310,7 +318,7 @@ cmd_start() {
 }
 
 cmd_takeover() {
-  local viewer=$VIEWER r xml disks d nv a st
+  local viewer=$VIEWER r xml disks d nv a st saved_domain
   while [ $# -gt 0 ]; do
     case "$1" in
       --viewer) viewer=1 ;;
@@ -332,6 +340,10 @@ cmd_takeover() {
     xml="$(virsh dumpxml --inactive "$DOMAIN")"
   else
     [ -r "$SAVED_XML" ] || die "'$DOMAIN' is not defined here and there is no saved definition at $SAVED_XML (it is saved by 'nomad start' and 'nomad migrate'); define it by hand with 'virsh define'"
+    saved_domain="$(xmllint --xpath 'string(/domain/name)' "$SAVED_XML" 2>/dev/null)" \
+      || die "could not read the saved definition at $SAVED_XML; refusing takeover"
+    [ "$saved_domain" = "$DOMAIN" ] \
+      || die "saved definition at $SAVED_XML belongs to '$saved_domain', not '$DOMAIN'; refusing takeover"
     xml="$(cat "$SAVED_XML")"
   fi
   disks="$(xmllint --xpath "//devices/disk[@device='disk']/source/@file" - <<<"$xml" 2>/dev/null | grep -o 'file="[^"]*"' | sed 's/^file="//; s/"$//')" || disks=""

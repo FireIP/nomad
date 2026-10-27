@@ -33,10 +33,12 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 
 root = Path(os.environ["SIM_ROOT"])
 host = os.environ["SIM_HOST"]
 peer = "b" if host == "a" else "a"
+domain = os.environ.get("DOMAIN", "nomad")
 args = sys.argv[1:]
 command = Path(sys.argv[0]).name
 if command == "ssh":
@@ -44,6 +46,8 @@ if command == "ssh":
         args = args[2:]
     route, remote = args
     if remote == "true":
+        if os.environ.get("SIM_SSH_UNREACHABLE") == "1":
+            raise SystemExit(1)
         raise SystemExit(0)
     env = os.environ.copy()
     env.update(SIM_HOST=peer, HOME=str(root / peer / "home"))
@@ -54,8 +58,9 @@ if command == "virsh":
     if args[:3] == ["list", "--all", "--name"]:
         if host == "b" and os.environ.get("SIM_FAIL_PEER_STATE") == "1":
             raise SystemExit(1)
-        if (root / host / "domstate").exists():
-            print("nomad")
+        state = root / host / ("domstate" if domain == "nomad" else f"{domain}.domstate")
+        if state.exists():
+            print(domain)
         raise SystemExit(0)
     if args[0] == "domstate":
         gate = root / "pause-domstate"
@@ -64,11 +69,18 @@ if command == "virsh":
             started.touch()
             while not (root / "domstate.release").exists():
                 time.sleep(0.02)
-        state = root / host / "domstate"
+        state = root / host / ("domstate" if domain == "nomad" else f"{domain}.domstate")
         if not state.exists():
             raise SystemExit(1)
         print(state.read_text().strip())
         raise SystemExit(0)
+    if args[0] == "define":
+        (root / host / "defined").write_text("defined")
+        raise SystemExit(0)
+if command == "xmllint":
+    if args[:2] == ["--xpath", "string(/domain/name)"]:
+        print(ET.parse(args[2]).findtext("name") or "")
+    raise SystemExit(0)
 raise SystemExit(1)
 """
         )
@@ -123,6 +135,9 @@ raise SystemExit(1)
 
     def record_path(self, host):
         return self.root / host / "home/.local/state/nomad/location"
+
+    def domain_record_path(self, host, domain):
+        return self.root / host / f"home/.local/state/nomad/{domain}/location"
 
     def test_missing_records_remain_missing(self):
         result = self.run_dry_run()
@@ -272,6 +287,57 @@ raise SystemExit(1)
         self.assertEqual(self.record_path("a").read_text(), stale)
         self.assertEqual(self.record_path("b").read_text(), stale)
         self.assertEqual((self.root / "a/domstate").read_text(), "shut off")
+
+    def test_nondefault_domain_state_is_isolated_and_synced_to_peer(self):
+        (self.root / "a/nomad-test.domstate").write_text("running")
+        default = (
+            "# nomad location record\n"
+            "OWNER=weak\nOWNER_HOST=host-b\nGEN=7\n"
+            "SINCE=2026-10-27T00:00:00+00:00\nEVENT=migrated\n"
+        )
+        for host in ("a", "b"):
+            path = self.record_path(host)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(default)
+        env = self.environment()
+        env["DOMAIN"] = "nomad-test"
+
+        result = subprocess.run(
+            [str(self.root / "a/home/.local/bin/nomad"), "where"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.record_path("a").read_text(), default)
+        self.assertEqual(self.record_path("b").read_text(), default)
+        for host in ("a", "b"):
+            self.assertIn("OWNER=strong", self.domain_record_path(host, "nomad-test").read_text())
+
+    def test_takeover_rejects_saved_xml_for_another_domain(self):
+        state_dir = self.root / "a/home/.local/state/nomad/nomad-test"
+        state_dir.mkdir(parents=True)
+        (state_dir / "domain.xml").write_text("<domain><name>nomad</name></domain>")
+        env = self.environment()
+        env.update(DOMAIN="nomad-test", SIM_SSH_UNREACHABLE="1")
+
+        result = subprocess.run(
+            [str(self.root / "a/home/.local/bin/nomad"), "takeover"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("belongs to 'nomad', not 'nomad-test'", result.stdout)
+        self.assertFalse((self.root / "a/defined").exists())
 
 
 if __name__ == "__main__":
