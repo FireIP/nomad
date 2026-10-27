@@ -468,7 +468,7 @@ cmd_migrate() {
     alert "Migration failed (exit $rc)"; exit "$rc"
   fi
   [ "$dry" != 1 ] || return 0
-  store_record "$OTHER_ROLE" "$((L_GEN + 1))" migrated "$(now)" "$route" "$route"
+  store_record "$OTHER_ROLE" "$((L_GEN + 1))" migrated "$(now)" "" "$route"
   if [ "$ROLE" = weak ] && [ "$inflate" = 1 ]; then
     log "Inflating on the other host"
     ssh "${SSH_OPTS[@]}" "$route" "$PEER_NOMAD inflate" || warn "inflate failed; run 'nomad inflate' on the other host"
