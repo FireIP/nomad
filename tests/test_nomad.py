@@ -233,6 +233,9 @@ class NomadTests(unittest.TestCase):
     def test_migration_of_nondefault_domain_tells_peer_which_domain(self):
         self.state("a", None)
         (self.root / "b/nomad-test.domstate").write_text("running")
+        viewer = self.bin / "virt-viewer"
+        viewer.write_text("#!/bin/sh\nexit 0\n")
+        viewer.chmod(0o755)
         self.run_nomad("b", "migrate", "--inflate", "--viewer", DOMAIN="nomad-test")
         self.assertEqual((self.root / "a/nomad-test.domstate").read_text(), "running")
         peer_calls = [
