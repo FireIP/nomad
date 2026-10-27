@@ -271,6 +271,57 @@ raise SystemExit(1)
             output, _ = migration.communicate(timeout=10)
         self.assertEqual(migration.returncode, 0, output)
 
+    def test_detached_viewer_does_not_hold_migration_lock(self):
+        self.addCleanup(lambda: (self.root / "viewer.release").touch())
+        config = self.root / "a/home/.config/nomad/config"
+        config.write_text(
+            'ROLE=strong\nROUTES="peer"\nAUTO_INFLATE=0\n'
+            'VIEWER=1\nVIEWER_SOURCE=1\nVIEWER_CMD=virt-viewer\n'
+        )
+        viewer = self.bin / "virt-viewer"
+        viewer.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "import time\n"
+            "if os.environ.get('SIM_HOST') == 'a':\n"
+            "    root = Path(os.environ['SIM_ROOT'])\n"
+            "    (root / 'viewer.started').touch()\n"
+            "    while not (root / 'viewer.release').exists():\n"
+            "        time.sleep(0.02)\n"
+        )
+        viewer.chmod(0o755)
+        env = self.environment()
+        env["DISPLAY"] = ":0"
+
+        result = subprocess.run(
+            [str(self.root / "a/home/.local/bin/nomad"), "migrate", "--route", "peer"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        deadline = time.monotonic() + 5
+        while not (self.root / "viewer.started").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue((self.root / "viewer.started").exists(), "local viewer was not launched")
+
+        where = subprocess.run(
+            [str(self.root / "a/home/.local/bin/nomad"), "where"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=5,
+        )
+        (self.root / "viewer.release").touch()
+        self.assertEqual(where.returncode, 0, where.stdout)
+        self.assertNotIn("checking location records without changing them", where.stdout)
+
     def test_start_refuses_when_peer_state_query_fails(self):
         (self.root / "a/domstate").write_text("shut off")
         (self.root / "b/domstate").write_text("running")

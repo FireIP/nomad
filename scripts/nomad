@@ -82,6 +82,11 @@ migration_lock() {
   flock -n "$1" "$MIGRATION_LOCK_FD"
 }
 
+release_migration_lock() {
+  flock -u "$MIGRATION_LOCK_FD"
+  exec {MIGRATION_LOCK_FD}>&-
+}
+
 # --- Location record: which host owns the VM (its live definition and current disk) ---------------------------
 # Lines OWNER=strong|weak, OWNER_HOST, GEN (bumped on every change of owner), SINCE, EVENT. Kept on both hosts.
 
@@ -473,6 +478,7 @@ cmd_migrate() {
     log "Inflating on the other host"
     ssh "${SSH_OPTS[@]}" "$route" "$PEER_NOMAD inflate" || warn "inflate failed; run 'nomad inflate' on the other host"
   fi
+  release_migration_lock
   if [ "$viewer" = 1 ]; then
     ssh "${SSH_OPTS[@]}" "$route" "$PEER_NOMAD viewer" || warn "could not open the viewer on the other host"
     # SPICE accepts one client at a time: a second viewer would kick the one on the new host
