@@ -51,6 +51,12 @@ if command == "ssh":
 if command == "virsh":
     if args[:2] == ["--connect", "qemu:///system"]:
         args = args[2:]
+    if args[:3] == ["list", "--all", "--name"]:
+        if host == "b" and os.environ.get("SIM_FAIL_PEER_STATE") == "1":
+            raise SystemExit(1)
+        if (root / host / "domstate").exists():
+            print("nomad")
+        raise SystemExit(0)
     if args[0] == "domstate":
         gate = root / "pause-domstate"
         started = root / "domstate.started"
@@ -95,6 +101,19 @@ raise SystemExit(1)
         return subprocess.run(
             [str(self.root / "a/home/.local/bin/nomad"), "migrate", "--dry-run"],
             env=self.environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10,
+        )
+
+    def run_start_with_peer_state_failure(self):
+        env = self.environment()
+        env["SIM_FAIL_PEER_STATE"] = "1"
+        return subprocess.run(
+            [str(self.root / "a/home/.local/bin/nomad"), "start", "--yes", "--no-viewer"],
+            env=env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -233,6 +252,26 @@ raise SystemExit(1)
             release.touch()
             output, _ = migration.communicate(timeout=10)
         self.assertEqual(migration.returncode, 0, output)
+
+    def test_start_refuses_when_peer_state_query_fails(self):
+        (self.root / "a/domstate").write_text("shut off")
+        (self.root / "b/domstate").write_text("running")
+        stale = (
+            "# nomad location record\n"
+            "OWNER=weak\nOWNER_HOST=host-b\nGEN=2\n"
+            "SINCE=2026-10-27T00:00:00+00:00\nEVENT=migrated\n"
+        )
+        for host in ("a", "b"):
+            path = self.record_path(host)
+            path.parent.mkdir(parents=True)
+            path.write_text(stale)
+
+        result = self.run_start_with_peer_state_failure()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not verify 'nomad' state on both hosts", result.stdout)
+        self.assertEqual(self.record_path("a").read_text(), stale)
+        self.assertEqual(self.record_path("b").read_text(), stale)
+        self.assertEqual((self.root / "a/domstate").read_text(), "shut off")
 
 
 if __name__ == "__main__":
