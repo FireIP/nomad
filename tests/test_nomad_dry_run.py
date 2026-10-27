@@ -10,6 +10,7 @@ import unittest
 
 
 REPO = Path(__file__).resolve().parents[1]
+STUB = Path(__file__).resolve().parent / "stubs" / "host-command.py"
 
 
 class DryRunReconcileTests(unittest.TestCase):
@@ -26,70 +27,7 @@ class DryRunReconcileTests(unittest.TestCase):
         (scripts / "migrate.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
         (scripts / "migrate.sh").chmod(0o755)
         stub = self.root / "host-command.py"
-        stub.write_text(
-            """#!/usr/bin/env python3
-import os
-from pathlib import Path
-import subprocess
-import sys
-import time
-import xml.etree.ElementTree as ET
-
-root = Path(os.environ["SIM_ROOT"])
-host = os.environ["SIM_HOST"]
-peer = "b" if host == "a" else "a"
-domain = os.environ.get("DOMAIN", "nomad")
-args = sys.argv[1:]
-command = Path(sys.argv[0]).name
-if command == "uname" and args == ["-n"]:
-    print(f"host-{host}")
-    raise SystemExit(0)
-if command == "ssh":
-    while args and args[0] == "-o":
-        args = args[2:]
-    route, remote = args
-    if remote == "true":
-        if os.environ.get("SIM_SSH_UNREACHABLE") == "1":
-            raise SystemExit(1)
-        raise SystemExit(0)
-    env = os.environ.copy()
-    env.pop("DOMAIN", None)
-    env.update(SIM_HOST=peer, HOME=str(root / peer / "home"))
-    raise SystemExit(subprocess.run(["bash", "-c", remote], env=env).returncode)
-if command == "virsh":
-    if args[:2] == ["--connect", "qemu:///system"]:
-        args = args[2:]
-    if args[:3] == ["list", "--all", "--name"]:
-        if host == "b" and os.environ.get("SIM_FAIL_PEER_STATE") == "1":
-            raise SystemExit(1)
-        if (root / host / "domstate").exists():
-            print("nomad")
-        for state in sorted((root / host).glob("*.domstate")):
-            print(state.name[:-len(".domstate")])
-        raise SystemExit(0)
-    if args[0] == "domstate":
-        domain = args[1]
-        gate = root / "pause-domstate"
-        started = root / "domstate.started"
-        if host == "a" and gate.exists() and not started.exists():
-            started.touch()
-            while not (root / "domstate.release").exists():
-                time.sleep(0.02)
-        state = root / host / ("domstate" if domain == "nomad" else f"{domain}.domstate")
-        if not state.exists():
-            raise SystemExit(1)
-        print(state.read_text().strip())
-        raise SystemExit(0)
-    if args[0] == "define":
-        (root / host / "defined").write_text("defined")
-        raise SystemExit(0)
-if command == "xmllint":
-    if args[:2] == ["--xpath", "string(/domain/name)"]:
-        print(ET.parse(args[2]).findtext("name") or "")
-    raise SystemExit(0)
-raise SystemExit(1)
-"""
-        )
+        shutil.copy2(STUB, stub)
         stub.chmod(0o755)
         for name in ("ssh", "virsh", "uname", "xmllint"):
             (self.bin / name).symlink_to(stub)
@@ -394,7 +332,7 @@ raise SystemExit(1)
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("belongs to 'nomad', not 'nomad-test'", result.stdout)
-        self.assertFalse((self.root / "a/defined").exists())
+        self.assertFalse((self.root / "a/nomad-test.domstate").exists())
 
 
 if __name__ == "__main__":

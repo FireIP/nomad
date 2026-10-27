@@ -1,1 +1,2 @@
 migration-*.log
+__pycache__/
