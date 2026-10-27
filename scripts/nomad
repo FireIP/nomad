@@ -36,6 +36,7 @@ OTHER_ROLE=weak; [ "$ROLE" = strong ] || OTHER_ROLE=strong
 STATE_DIR="${NOMAD_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/nomad}"
 RECORD="$STATE_DIR/location"
 SAVED_XML="$STATE_DIR/domain.xml"
+MIGRATION_LOCK="$STATE_DIR/migration.lock"
 PEER_NOMAD='$HOME/.local/bin/nomad'   # expanded by the peer's shell
 
 # First configured route whose ssh works (ethernet is listed before wifi); prints the alias.
@@ -52,6 +53,12 @@ is_active()  { case "$1" in running|paused|"in shutdown"|pmsuspended) return 0 ;
 state_here() { vm_state "$DOMAIN" || true; }
 peer_state() { local s; s="$(ssh "${SSH_OPTS[@]}" "$1" "virsh --connect qemu:///system domstate $DOMAIN" 2>/dev/null)" || s=""; printf '%s' "${s//$'\n'/}"; }
 now()        { date -Is; }
+
+migration_lock() {
+  mkdir -p "$STATE_DIR"
+  exec {MIGRATION_LOCK_FD}>"$MIGRATION_LOCK"
+  flock -n "$1" "$MIGRATION_LOCK_FD"
+}
 
 # --- Location record: which host owns the VM (its live definition and current disk) ---------------------------
 # Lines OWNER=strong|weak, OWNER_HOST, GEN (bumped on every change of owner), SINCE, EVENT. Kept on both hosts.
@@ -324,12 +331,17 @@ cmd_takeover() {
 }
 
 cmd_where() {
-  need_cmd virsh ssh
-  local r lst rc=0
+  need_cmd virsh ssh flock
+  local r lst rc=0 read_only=0
+  if ! migration_lock -s; then
+    read_only=1
+    log "A migration invocation is running; checking location records without changing them"
+  fi
   lst="$(state_here)"
   echo "This host ($ROLE, $(uname -n)): ${lst:-not defined}"
   if r="$(pick_route)"; then
-    reconcile "$r" || rc=1
+    if [ "$read_only" = 1 ]; then reconcile "$r" --read-only || rc=1
+    else reconcile "$r" || rc=1; fi
     echo "Other host (via $r): ${PEER_STATE:-not defined}"
     if [ "$rc" -ne 0 ]; then
       echo "Records: here $L_OWNER gen $L_GEN ${L_EVENT:-none}, other host $P_OWNER gen $P_GEN ${P_EVENT:-none}"
@@ -383,7 +395,8 @@ cmd_migrate() {
       *) die "unknown option: $a" ;;
     esac
   done
-  need_cmd virsh ssh xmllint
+  need_cmd virsh ssh xmllint flock
+  migration_lock -x || die "another migration or location check is running; retry in a moment"
   [ "$(state_here)" = running ] || die "'$DOMAIN' is not running on this host"
   if [ -z "$route" ]; then
     route="$(pick_route)" || { alert "No route to the other host (tried: $ROUTES)"; exit 1; }

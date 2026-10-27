@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 
@@ -31,6 +32,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 root = Path(os.environ["SIM_ROOT"])
 host = os.environ["SIM_HOST"]
@@ -50,6 +52,12 @@ if command == "virsh":
     if args[:2] == ["--connect", "qemu:///system"]:
         args = args[2:]
     if args[0] == "domstate":
+        gate = root / "pause-domstate"
+        started = root / "domstate.started"
+        if host == "a" and gate.exists() and not started.exists():
+            started.touch()
+            while not (root / "domstate.release").exists():
+                time.sleep(0.02)
         state = root / host / "domstate"
         if not state.exists():
             raise SystemExit(1)
@@ -142,6 +150,89 @@ raise SystemExit(1)
         result = self.run_dry_run()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("after a takeover: the copies have diverged", result.stdout)
+
+    def test_where_does_not_reconcile_during_migration(self):
+        stale = (
+            "# nomad location record\n"
+            "OWNER=weak\nOWNER_HOST=host-b\nGEN=1\n"
+            "SINCE=2026-10-27T00:00:00+00:00\nEVENT=start\n"
+        )
+        for host in ("a", "b"):
+            path = self.record_path(host)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(stale)
+        (self.root / "pause-domstate").touch()
+        started = self.root / "migration.started"
+        release = self.root / "migration.release"
+        (self.root / "scripts/migrate.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "touch \"$SIM_ROOT/migration.started\"\n"
+            "while [ ! -e \"$SIM_ROOT/migration.release\" ]; do sleep 0.02; done\n"
+        )
+        (self.root / "scripts/migrate.sh").chmod(0o755)
+        migration = subprocess.Popen(
+            [str(self.root / "a/home/.local/bin/nomad"), "migrate", "--route", "peer"],
+            env=self.environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not (self.root / "domstate.started").exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(
+                (self.root / "domstate.started").exists(),
+                "migration did not acquire its lock before querying libvirt",
+            )
+            before_precheck = {
+                host: self.record_path(host).read_text() for host in ("a", "b")
+            }
+            where = subprocess.run(
+                [str(self.root / "a/home/.local/bin/nomad"), "where"],
+                env=self.environment(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(where.returncode, 0, where.stdout)
+            self.assertIn("checking location records without changing them", where.stdout)
+            self.assertEqual(
+                {host: self.record_path(host).read_text() for host in ("a", "b")},
+                before_precheck,
+            )
+
+            (self.root / "domstate.release").touch()
+            deadline = time.monotonic() + 5
+            while not started.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(started.exists(), "migration did not reach its running phase")
+            before = {host: self.record_path(host).read_text() for host in ("a", "b")}
+
+            where = subprocess.run(
+                [str(self.root / "a/home/.local/bin/nomad"), "where"],
+                env=self.environment(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(where.returncode, 0, where.stdout)
+            self.assertIn("checking location records without changing them", where.stdout)
+            self.assertIn("EVENT=migrating", before["a"])
+            self.assertEqual(
+                {host: self.record_path(host).read_text() for host in ("a", "b")},
+                before,
+            )
+        finally:
+            (self.root / "domstate.release").touch()
+            release.touch()
+            output, _ = migration.communicate(timeout=10)
+        self.assertEqual(migration.returncode, 0, output)
 
 
 if __name__ == "__main__":
