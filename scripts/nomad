@@ -66,6 +66,7 @@ peer_state() {
   local domain out remote
   printf -v domain '%q' "$DOMAIN"
   remote="names=\$(virsh --connect qemu:///system list --all --name) || exit 1; if printf '%s\\n' \"\$names\" | grep -Fxq -- $domain; then virsh --connect qemu:///system domstate $domain || exit 1; else printf '__NOMAD_NOT_DEFINED__'; fi"
+  printf -v remote 'bash -c %q' "export LC_ALL=C; $remote"
   if out="$(ssh "${SSH_OPTS[@]}" "$1" "$remote" 2>/dev/null)"; then
     [ "$out" != __NOMAD_NOT_DEFINED__ ] || return 0
     printf '%s' "${out//$'\n'/}"
