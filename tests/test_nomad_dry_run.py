@@ -128,6 +128,21 @@ raise SystemExit(1)
         self.assertFalse(self.record_path("a").exists())
         self.assertFalse(self.record_path("b").exists())
 
+    def test_takeover_with_same_owner_and_stale_peer_generation_is_conflict(self):
+        (self.root / "b/domstate").write_text("shut off")
+        for host, generation, event in (("a", 2, "takeover"), ("b", 1, "migrated")):
+            path = self.record_path(host)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "# nomad location record\n"
+                f"OWNER=strong\nOWNER_HOST=host-a\nGEN={generation}\n"
+                f"SINCE=2026-10-27T00:00:00+00:00\nEVENT={event}\n"
+            )
+
+        result = self.run_dry_run()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("after a takeover: the copies have diverged", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

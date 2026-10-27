@@ -163,8 +163,10 @@ reconcile() {
     alert "'$DOMAIN' is $lst here AND $pst on the other host: two copies are running. Shut down the one you don't want, then undefine it there with 'virsh undefine $DOMAIN --keep-nvram' (keep its disk until you're sure)"
     return 1
   fi
-  if [ -n "$lst" ] && [ -n "$pst" ] && [ "$L_KNOWN" = 1 ] && [ "$P_KNOWN" = 1 ] && [ "$L_OWNER" != "$P_OWNER" ]; then
-    alert "The hosts disagree where '$DOMAIN' lives (here: $L_OWNER gen $L_GEN $L_EVENT, other host: $P_OWNER gen $P_GEN $P_EVENT) and both have it defined, e.g. after a takeover: the copies have diverged. Decide which copy to keep, then on the OTHER host run 'virsh undefine $DOMAIN --keep-nvram' (keep its disk until you're sure)"
+  if [ -n "$lst" ] && [ -n "$pst" ] && [ "$L_KNOWN" = 1 ] && [ "$P_KNOWN" = 1 ] \
+     && { [ "$L_OWNER" != "$P_OWNER" ] \
+       || { [ "$L_GEN" != "$P_GEN" ] && { [ "$L_EVENT" = takeover ] || [ "$P_EVENT" = takeover ]; }; }; }; then
+    alert "The hosts have conflicting location records for '$DOMAIN' (here: $L_OWNER gen $L_GEN $L_EVENT, other host: $P_OWNER gen $P_GEN $P_EVENT) and both have it defined, e.g. after a takeover: the copies have diverged. Decide which copy to keep, then on the OTHER host run 'virsh undefine $DOMAIN --keep-nvram' (keep its disk until you're sure)"
     return 1
   fi
   if [ "$L_KNOWN" = 1 ] && { [ "$P_KNOWN" != 1 ] || [ "$L_GEN" -gt "$P_GEN" ] || { [ "$L_GEN" -eq "$P_GEN" ] && [ "$L_OWNER" = "$P_OWNER" ]; }; }; then
