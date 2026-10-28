@@ -40,7 +40,7 @@
 - [x] Re-measure migration time with `--monitor` after 8.2: NUC → laptop 3 min 27 s (+~30 s deflate while playing YouTube), laptop → NUC 3 min 22 s, YouTube kept playing (was 221 s with auto-converge before)
 - [x] Numbers checked (12 GiB/6 vCPU at the laptop, 32 GiB/16 vCPU at the NUC): guide 8.1/8.2, `nomad.xml` and `05-create-vm.sh` agree
 
-- [ ] Multiple monitors for the VM: add a second video head (`<video><model type='virtio' heads='2'/></video>` in `nomad.xml`, same on both hosts) and open it with `remote-viewer` / `virt-viewer --connect qemu:///system nomad` (multi-monitor via SPICE, `spice-vdagent` in the guest). Check it survives migration and that the laptop's own display plus an external monitor work. Update guide Phase 4/8 and `05-create-vm.sh` if it works
+- [ ] Multiple monitors for the VM: configure four virtio video heads and the SPICE agent channel in `nomad.xml` / `05-create-vm.sh`; install `spice-vdagent` in the guest. Verify with the actual Kubuntu desktop and viewer on both hosts: one/multiple outputs, enable/disable, laptop built-in plus external display, performance with unused heads, and live migration both directions. Laptop report: libvirt 12.8.0, virt-install 5.1.0, QEMU 10.2.1. With `heads='3'` and a restart, spice-vdagent runs and DRM lists Virtual-1/2/3; standalone virt-viewer opens all three and its Displays menu can turn off 2/3, while the embedded virt-manager console lacks that menu. Still verify physical screen placement, one-vs-three display performance, and migration. NUC is unavailable; defer its version and migration checks. See guide Phases 4, 5, and 8.3.
 
 ## `nomad` command
 
@@ -53,7 +53,7 @@
   - [ ] `nomad takeover` (throwaway: `DOMAIN=nomad-test`) and the diverged-copies alert when the other host comes back
 - [ ] Test the stall alert (no data for `STALL_SECS`: bell, red message, desktop notification)
 - [x] `nomad start` / `nomad migrate` open the console (`nomad viewer`, `VIEWER`/`VIEWER_CMD` in the config): locally on start, on the destination after migrate (a viewer on the source too is opt-in with `VIEWER_SOURCE=1`: SPICE is single-client, so two viewers disconnect/freeze each other). Tested on the real hosts: works
-- [ ] Multiple monitors (see the multi-monitor item above)
+- [ ] Multiple monitors (see the multi-monitor item above; configuration and guide updated, real-host validation remains)
 - [ ] Analyse performance stutters of the VM on the NUC: check host vs. guest CPU/IO (`perf`/`top`/`iostat` on the host, `virsh domstats`), vCPU pinning and steal time, ballooning/memory pressure, qcow2 on virtio-scsi (cache/io mode, `discard`), SPICE/virtio-gpu rendering (no 3D), and host power/CPU governor
 
 ## Guide
