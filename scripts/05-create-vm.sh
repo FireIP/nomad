@@ -43,8 +43,9 @@ case "${1:-}" in
       --controller type=scsi,model=virtio-scsi \
       --network network=default,model=virtio,rom.bar=off \
       --graphics spice \
-      --video virtio \
+      --video virtio,heads=4 \
       --channel unix,target_type=virtio,name=org.qemu.guest_agent.0 \
+      --channel spicevmc \
       --os-variant detect=on,require=on \
       --cdrom "$iso"
     ;;

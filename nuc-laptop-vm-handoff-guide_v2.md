@@ -363,8 +363,9 @@ virt-install \
   --controller type=scsi,model=virtio-scsi \
   --network network=default,model=virtio,rom.bar=off \
   --graphics spice \
-  --video virtio \
+  --video virtio,heads=4 \
   --channel unix,target_type=virtio,name=org.qemu.guest_agent.0 \
+  --channel spicevmc \
   --os-variant detect=on,require=on \
   --cdrom /path/to/your-installer.iso
 ```
@@ -372,6 +373,9 @@ virt-install \
 Notes:
 - `--memory 12288` (12GiB) is comfortably sized against the laptop's confirmed 24GB — leaves plenty for its own desktop environment and QEMU's overhead alongside the guest. You'll be able to use much more while docked at the NUC via ballooning (Phase 8).
 - `--vcpus 6` leaves the laptop's 8 logical threads some headroom for its own OS. You'll get more out of the NUC via hotplug (Phase 8).
+- `--video virtio,heads=4` gives the guest up to four virtual display outputs. This is a maximum, not a requirement to use four; the SPICE viewer maps guest displays onto whichever physical screens you choose.
+- `--channel spicevmc` provides the SPICE agent channel needed for guest integration. The video head count and channel must be the same on both hosts for migration.
+- For an existing VM, changing this `virt-install` command does not change its definition; update the existing domain as described in Phase 8.3.
 - `--network network=default,model=virtio,rom.bar=off` attaches to the NAT network from Phase 1.3 — remember to set the guest's static IP once it's installed (also Phase 1.3) so its network identity stays identical regardless of which host it's running on.
 - `rom.bar=off` (`<rom bar='off'/>` in the XML) is required for live migration. The virtio-net option ROM is migrated as a RAM block, and distros ship it in different sizes (e.g. 512 KB on Ubuntu, 256 KB on Kali), which makes the destination fail with `Size mismatch: ...virtio-net-pci.rom` and a generic `error while loading state for instance 0x0 of device 'ram'`. The guest never PXE-boots, so nothing is lost.
 - `--cpu host-model` here is just a placeholder to get through the install — swapped out for the real baseline (2.5) right after.
@@ -399,6 +403,13 @@ This gives you clean `virsh shutdown`, IP reporting, and consistent snapshots. V
 ```bash
 virsh domifaddr nomad
 ```
+
+For SPICE display integration, install the guest agent too:
+```bash
+sudo apt install spice-vdagent
+```
+
+The VM must have the `spicevmc` channel from Phase 4. Log out and back in (or reboot) after installation so the desktop-session agent is running. You can check available outputs in the guest's display settings; the viewer and guest desktop must both support the requested layout. The exact dynamic multi-display behavior of virtio-gpu can vary by guest, desktop session, and viewer, so verify it in Phase 8.3 rather than assuming that installing the agent alone enables every output.
 
 Also in the guest, auto-online hotplugged vCPUs (needed for Phase 8.1; without it `setvcpus` adds CPUs that stay offline):
 ```bash
@@ -538,7 +549,32 @@ Caveat: the balloon can only reclaim memory the guest voluntarily releases. Defl
 
 **`scripts/migrate.sh` deflates automatically.** If the guest has more than 6 vCPUs or a balloon above 12 GiB, it runs `setvcpus 6` and `setmem 12582912KiB`, waits up to 300 s (`DEFLATE_TIMEOUT`), and aborts before migrating if the targets aren't reached. Skip it with `NO_DEFLATE=1`; change targets with `TARGET_VCPUS` / `TARGET_MEM_KIB`. After arriving at the NUC, inflate manually with the commands above. Never migrate while inflated: the laptop only has 24 GB.
 
-### 8.3 (Optional, fiddlier) 3D-accelerated graphics
+### 8.3 Multiple displays
+
+The VM is configured with four virtio-gpu heads, so the guest can use up to four virtual displays. This does not pass physical monitors through to the VM: open one SPICE console with the standalone `virt-viewer` (`nomad viewer` when `VIEWER_CMD=virt-viewer`), then use **View → Displays → Display N** to toggle guest display windows. Move those windows to the laptop's external monitor, or use the viewer's fullscreen controls across the host screens. If the embedded virt-manager console does not show a Displays menu, close it and run `virt-viewer --connect qemu:///system --reconnect nomad` instead. Do not keep two console clients connected; SPICE is single-client here. Arrange the active guest outputs in the desktop's display settings.
+
+On the tested Kubuntu laptop, standalone `virt-viewer` opened all three configured displays, and its Displays menu can turn off displays 2 and 3 when only one is wanted. The embedded virt-manager console did not expose that menu. Turning off extra displays stops them being active, but does not lower the configured four-head ceiling; measure performance on the actual workload rather than assuming no fixed overhead.
+
+If the viewer has no additional entries, first confirm that the guest has `spice-vdagent` installed and running, the SPICE agent channel exists in the domain XML, and the VM was fully shut down and started after changing `heads`. The guest may not list another active display until the viewer requests it. If the entry is present but the guest does not expose it, collect the guest's output from `kscreen-doctor -o` and `ls -1 /sys/class/drm/` along with the viewer and guest-agent status before changing the video device.
+
+For the existing VM, update its persistent definition on the host where it currently lives, then restart it so QEMU creates the additional heads:
+```bash
+virsh shutdown nomad
+# Wait for `virsh domstate nomad` to report "shut off"
+virsh edit nomad
+# In <video>, change the virtio model's heads='1' to heads='4'.
+# Preserve the other model attributes and the existing PCI address.
+virsh start nomad
+virsh dumpxml nomad | grep -A2 '<video>'
+```
+
+Confirm the output shows `heads='4'`. With the normal persistent migration command, the updated definition follows the VM; verify it again after migration. `nomad.xml` is an exported snapshot, so refresh it from the real domain after applying and verifying the change rather than treating an old snapshot as the live definition.
+
+The configured head count is the ceiling. Adding a display beyond four requires changing the video device configuration while the VM is shut down; keep the definition consistent on both hosts before migrating. Displays that are configured but inactive should do little rendering work, but still have some device/resource overhead; active displays cost more as their resolution and refresh rate increase. Do not assume a zero performance or memory cost.
+
+Validate on both hosts before relying on this setup: test one and multiple displays, enable/disable available outputs, use the laptop's built-in and external screens, and migrate in both directions. Dynamic output changes depend on the guest desktop, virtio-gpu driver, SPICE agent, and viewer versions. If these tests fail, record the versions and behavior before changing the video model or adding more heads.
+
+### 8.4 (Optional, fiddlier) 3D-accelerated graphics
 
 If plain virtio-gpu feels sluggish and it bothers you enough to troubleshoot driver/mesa versions, `accel3d` + SPICE with GL enabled (virgl) hardware-accelerates OpenGL through whichever host's GPU is currently running the VM. Get everything else solid first.
 
