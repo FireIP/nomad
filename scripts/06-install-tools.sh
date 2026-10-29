@@ -3,6 +3,8 @@
 # Run it on BOTH hosts. Safe to re-run; existing values are offered as defaults.
 # Usage: 06-install-tools.sh [--role strong|weak] [--routes "alias1 alias2"] [--auto-inflate|--no-auto-inflate]
 #                            [--viewer-cmd virt-viewer|virt-manager] [--no-viewer]
+#                            [--smart-monitors-mode off|all_connected|fixed_count|all_minus_n]
+#                            [--smart-monitors-fixed N] [--smart-monitors-minus N]
 #                            [--non-interactive]
 #   --routes   ssh aliases (from ~/.ssh/config) that reach the OTHER host, best first: ethernet, then wifi, ...
 #   --role     strong = the NUC (inflates, never deflated for the laptop's sake), weak = the laptop
@@ -10,6 +12,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CONFIG="${NOMAD_CONFIG:-$HOME/.config/nomad/config}"
 ROLE="" ROUTES="" AUTO_INFLATE="" VIEWER="" VIEWER_CMD=""
+SMART_MONITORS_MODE="" SMART_MONITORS_FIXED="" SMART_MONITORS_MINUS=""
 [ ! -r "$CONFIG" ] || source "$CONFIG"
 INTERACTIVE=1
 while [ $# -gt 0 ]; do
@@ -20,6 +23,9 @@ while [ $# -gt 0 ]; do
     --no-auto-inflate) AUTO_INFLATE=0 ;;
     --viewer-cmd) VIEWER_CMD="${2:?}"; VIEWER=1; shift ;;
     --no-viewer) VIEWER=0 ;;
+    --smart-monitors-mode) SMART_MONITORS_MODE="${2:?}"; shift ;;
+    --smart-monitors-fixed) SMART_MONITORS_FIXED="${2:?}"; shift ;;
+    --smart-monitors-minus) SMART_MONITORS_MINUS="${2:?}"; shift ;;
     --non-interactive) INTERACTIVE=0 ;;
     *) die "unknown option: $1" ;;
   esac
@@ -48,12 +54,26 @@ fi
 if [ -z "$VIEWER_CMD" ]; then
   if command -v virt-viewer >/dev/null 2>&1 || ! command -v virt-manager >/dev/null 2>&1; then VIEWER_CMD=virt-viewer; else VIEWER_CMD=virt-manager; fi
 fi
+[ -n "$SMART_MONITORS_MODE" ] || SMART_MONITORS_MODE=all_minus_n
+[ -n "$SMART_MONITORS_FIXED" ] || SMART_MONITORS_FIXED=1
+[ -n "$SMART_MONITORS_MINUS" ] || SMART_MONITORS_MINUS=1
 if [ "$INTERACTIVE" = 1 ]; then
   a=""
   read -r -p "Open the VM console automatically on start/migrate? (y/n) [$([ "$VIEWER" = 1 ] && echo y || echo n)]: " a || true
   case "$a" in [Yy]*) VIEWER=1 ;; [Nn]*) VIEWER=0 ;; esac
   [ "$VIEWER" != 1 ] || ask VIEWER_CMD "Console program (virt-viewer or virt-manager)"
+  if [ "$VIEWER" = 1 ]; then
+    ask SMART_MONITORS_MODE "Smart monitor mode (off|all_connected|fixed_count|all_minus_n)"
+    case "$SMART_MONITORS_MODE" in
+      fixed_count) ask SMART_MONITORS_FIXED "Guest display windows to target" ;;
+      all_minus_n) ask SMART_MONITORS_MINUS "Connected host displays to leave for the host" ;;
+    esac
+  fi
 fi
+
+case "$SMART_MONITORS_MODE" in off|all_connected|fixed_count|all_minus_n) ;; *) die "smart monitor mode must be off|all_connected|fixed_count|all_minus_n" ;; esac
+[[ "$SMART_MONITORS_FIXED" =~ ^[0-9]+$ ]] && [ "$SMART_MONITORS_FIXED" -ge 1 ] || die "SMART_MONITORS_FIXED must be an integer >= 1"
+[[ "$SMART_MONITORS_MINUS" =~ ^[0-9]+$ ]] && [ "$SMART_MONITORS_MINUS" -ge 0 ] || die "SMART_MONITORS_MINUS must be an integer >= 0"
 
 for r in $ROUTES; do
   if ssh -o BatchMode=yes -o ConnectTimeout=3 "$r" true 2>/dev/null; then log "ssh $r: ok"
@@ -68,6 +88,9 @@ mkdir -p "$(dirname "$CONFIG")" "$HOME/.local/bin"
   echo "AUTO_INFLATE=$AUTO_INFLATE"
   echo "VIEWER=$VIEWER"
   echo "VIEWER_CMD=$VIEWER_CMD"
+  echo "SMART_MONITORS_MODE=$SMART_MONITORS_MODE"
+  echo "SMART_MONITORS_FIXED=$SMART_MONITORS_FIXED"
+  echo "SMART_MONITORS_MINUS=$SMART_MONITORS_MINUS"
   echo "STALL_SECS=${STALL_SECS:-60}"
 } > "$CONFIG"
 ln -sfn "$SCRIPT_DIR/nomad" "$HOME/.local/bin/nomad"

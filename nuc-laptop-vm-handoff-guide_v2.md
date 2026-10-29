@@ -469,7 +469,7 @@ Both directions have been verified working (NUC → laptop and laptop → NUC). 
 
 ### 7.1 The `nomad` command (daily routine)
 
-`scripts/06-install-tools.sh` (run on both hosts) asks which role the host has (strong = NUC, weak = laptop), the ssh aliases that reach the *other* host (best first, e.g. `laptop-eth laptop-wifi`, defined in `~/.ssh/config`), and whether to inflate automatically after migrating to the strong host. It writes `~/.config/nomad/config` and links `~/.local/bin/nomad` (fish: `fish_add_path ~/.local/bin`). Non-interactive: `--role`, `--routes "a b"`, `--auto-inflate|--no-auto-inflate`, `--non-interactive`.
+`scripts/06-install-tools.sh` (run on both hosts) asks which role the host has (strong = NUC, weak = laptop), the ssh aliases that reach the *other* host (best first, e.g. `laptop-eth laptop-wifi`, defined in `~/.ssh/config`), whether to inflate automatically after migrating to the strong host, and the smart-monitor viewer mode. It writes `~/.config/nomad/config` and links `~/.local/bin/nomad` (fish: `fish_add_path ~/.local/bin`). Non-interactive: `--role`, `--routes "a b"`, `--auto-inflate|--no-auto-inflate`, `--smart-monitors-mode off|all_connected|fixed_count|all_minus_n`, `--smart-monitors-fixed N`, `--smart-monitors-minus N`, `--non-interactive`.
 
 | Command | What it does |
 |---|---|
@@ -477,10 +477,19 @@ Both directions have been verified working (NUC → laptop and laptop → NUC). 
 | `nomad start` | starts the VM here, then opens the console. Refuses if the other host runs a copy, or if the location record (below) says the VM lives there and the copy here is stale. If the other host can't be reached, it starts only when the record says the VM lives here, after a `[y/N]` prompt (`--yes` skips it) |
 | `nomad where` | shows where the VM lives: libvirt state on both hosts and the location record, and fixes a record that libvirt contradicts. If the other host can't be reached it shows this host's record |
 | `nomad takeover` | for when the other host is gone for good (dead, stolen, away for a long time) while it owned the VM: re-defines the VM here from the saved definition and starts it from the stale local disk. You type the domain name to confirm. Everything the VM did on the other host since it left here is lost to this copy. It refuses while the other host is reachable |
-| `nomad viewer` | opens the console for the VM wherever it runs (here, else over `qemu+ssh` to the other host). `start` / `migrate` take `--viewer` / `--no-viewer`; the defaults are `VIEWER=1` and `VIEWER_CMD=virt-viewer` (or `virt-manager`) in `~/.config/nomad/config` |
+| `nomad viewer` | opens the console for the VM wherever it runs (here, else over `qemu+ssh` to the other host). `start` / `migrate` take `--viewer` / `--no-viewer`; the defaults are `VIEWER=1` and `VIEWER_CMD=virt-viewer` (or `virt-manager`) in `~/.config/nomad/config`. Smart-monitor modes (`SMART_MONITORS_MODE`) are applied automatically when opening a viewer. |
 | `nomad inflate` / `deflate` / `status` | resize the VM running on this host (Phase 8). When the VM isn't running here, `status` shows the location record |
 
 If no data moves for `STALL_SECS` (60) the terminal rings, a red message appears and `notify-send` shows a desktop notification; Ctrl-C asks whether to abort the migration. The ETA is approximate: RAM dirtying makes the remaining amount move. The raw `virsh migrate` command above still works and `migrate.sh <peer> --progress` is what `nomad migrate` calls.
+
+**Smart monitor policy.** `nomad` can pick a target number of guest display windows based on currently connected host screens:
+
+- `SMART_MONITORS_MODE=off` — keep normal viewer behavior.
+- `SMART_MONITORS_MODE=all_connected` — target all detected host screens.
+- `SMART_MONITORS_MODE=fixed_count` with `SMART_MONITORS_FIXED=N` — always target `N`.
+- `SMART_MONITORS_MODE=all_minus_n` with `SMART_MONITORS_MINUS=N` — target `(connected - N)`, with a floor of 1.
+
+When smart mode is active, `nomad` forces standalone `virt-viewer` (not embedded virt-manager console) and launches it fullscreen with a generated monitor mapping. This is viewer-side behavior only; it does not rewrite VM XML or change the configured virtual head ceiling.
 
 **Location record.** `nomad` keeps track of which host owns the VM (its live definition and current disk) in `~/.local/state/nomad/location` on both hosts: owner role and hostname, a generation number that grows with every change of owner, the time, and the last event (`migrated`, `start`, `takeover`, ...). `nomad migrate` updates it on both hosts once the migration succeeds; `nomad start` and `nomad where` sync it whenever the other host is reachable, and libvirt's live state wins if the two disagree. Without a record (first use, or a migration that was cut off) it is guessed from libvirt: defined here means it lives here. `~/.local/state/nomad/domain.xml` keeps the VM definition from the last start or migration, so `nomad takeover` can re-define it after `--undefinesource` removed it. For a non-default `DOMAIN`, the location record, saved definition, and migration lock are kept in `~/.local/state/nomad/$DOMAIN/`, leaving the default `nomad` state unchanged. Both hosts need the same version of the scripts: the record is read and written on the other host through `nomad` over ssh.
 
