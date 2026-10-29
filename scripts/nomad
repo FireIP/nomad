@@ -19,6 +19,8 @@
 # Config: ${NOMAD_CONFIG:-~/.config/nomad/config}: ROLE=strong|weak (this host), ROUTES="alias1 alias2" (ssh aliases of
 # the OTHER host in order of preference, e.g. ethernet first, then wifi), AUTO_INFLATE=1|0, STALL_SECS (60),
 # VIEWER=1|0 (open the console automatically), VIEWER_CMD=virt-viewer|virt-manager,
+# SMART_MONITORS_MODE=off|all_connected|fixed_count|all_minus_n (viewer policy),
+# SMART_MONITORS_FIXED (for fixed_count), SMART_MONITORS_MINUS (for all_minus_n),
 # VIEWER_SOURCE=1 also opens a viewer here on the peer after migrating (SPICE is single-client, so it disconnects the new host's viewer).
 # State: ${NOMAD_STATE_DIR:-~/.local/state/nomad}: location (which host owns the VM, kept in sync on both hosts by
 # start/migrate/where) and domain.xml (the VM definition, saved on start/migrate for takeover). Non-default domains
@@ -28,6 +30,7 @@ source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib.sh"
 CONFIG="${NOMAD_CONFIG:-$HOME/.config/nomad/config}"
 [ -r "$CONFIG" ] || die "no config at $CONFIG; run scripts/06-install-tools.sh"
 ROLE="" ROUTES="" AUTO_INFLATE=1 VIEWER=1 VIEWER_CMD=virt-viewer VIEWER_SOURCE=0
+SMART_MONITORS_MODE=off SMART_MONITORS_FIXED=1 SMART_MONITORS_MINUS=1
 source "$CONFIG"
 [ "$ROLE" = strong ] || [ "$ROLE" = weak ] || die "ROLE in $CONFIG must be 'strong' or 'weak'"
 [ -n "$ROUTES" ] || die "ROUTES in $CONFIG is empty"
@@ -86,6 +89,46 @@ migration_lock() {
 release_migration_lock() {
   flock -u "$MIGRATION_LOCK_FD"
   exec {MIGRATION_LOCK_FD}>&-
+}
+
+normalize_smart_mode() {
+  case "$1" in
+    off|all_connected|fixed_count|all_minus_n) echo "$1" ;;
+    all_minus_one) echo all_minus_n ;;
+    "") echo off ;;
+    *) die "SMART_MONITORS_MODE in $CONFIG must be off|all_connected|fixed_count|all_minus_n" ;;
+  esac
+}
+
+smart_viewer_target() {
+  local mode="$1" displays=1 target=1
+  displays="$(connected_monitors)"
+  case "$mode" in
+    off) return 1 ;;
+    all_connected) target="$displays" ;;
+    fixed_count)
+      [[ "${SMART_MONITORS_FIXED:-}" =~ ^[0-9]+$ ]] || die "SMART_MONITORS_FIXED in $CONFIG must be an integer >= 1"
+      [ "${SMART_MONITORS_FIXED:-0}" -ge 1 ] || die "SMART_MONITORS_FIXED in $CONFIG must be >= 1"
+      target="$SMART_MONITORS_FIXED"
+      ;;
+    all_minus_n)
+      [[ "${SMART_MONITORS_MINUS:-}" =~ ^[0-9]+$ ]] || die "SMART_MONITORS_MINUS in $CONFIG must be an integer >= 0"
+      target=$((displays - SMART_MONITORS_MINUS))
+      [ "$target" -ge 1 ] || target=1
+      ;;
+    *) return 1 ;;
+  esac
+  echo "$target"
+}
+
+open_viewer_smart() {
+  local uri="${1:-qemu:///system}" mode target
+  mode="$(normalize_smart_mode "${SMART_MONITORS_MODE:-off}")"
+  if target="$(smart_viewer_target "$mode" 2>/dev/null)"; then
+    NOMAD_SMART_MONITORS_MODE="$mode" NOMAD_SMART_MONITORS_TARGET="$target" open_viewer "$uri"
+  else
+    open_viewer "$uri"
+  fi
 }
 
 # --- Location record: which host owns the VM (its live definition and current disk) ---------------------------
@@ -316,14 +359,14 @@ cmd_start() {
     fi
   fi
   case "$(state_here)" in
-    running) log "'$DOMAIN' is already running here"; claim_here start "$r"; [ "$viewer" != 1 ] || open_viewer; return 0 ;;
+    running) log "'$DOMAIN' is already running here"; claim_here start "$r"; [ "$viewer" != 1 ] || open_viewer_smart; return 0 ;;
     "shut off") ;;
     *) die "'$DOMAIN' is $(state_here); resolve that first" ;;
   esac
   save_xml
   virsh start "$DOMAIN"
   claim_here start "$r"
-  [ "$viewer" != 1 ] || open_viewer
+  [ "$viewer" != 1 ] || open_viewer_smart
 }
 
 cmd_takeover() {
@@ -376,7 +419,7 @@ cmd_takeover() {
   store_record "$ROLE" "$((L_GEN + 1))" takeover "$(now)" ""
   save_xml
   log "'$DOMAIN' taken over; it now lives here"
-  [ "$viewer" != 1 ] || open_viewer
+  [ "$viewer" != 1 ] || open_viewer_smart
 }
 
 cmd_where() {
@@ -420,9 +463,9 @@ cmd_status() {
 }
 
 cmd_viewer() {
-  if [ "$(state_here)" = running ]; then open_viewer; return; fi
+  if [ "$(state_here)" = running ]; then open_viewer_smart; return; fi
   local r
-  if r="$(pick_route)"; then open_viewer "qemu+ssh://$r/system"; return; fi
+  if r="$(pick_route)"; then open_viewer_smart "qemu+ssh://$r/system"; return; fi
   local_view
   if [ "$L_OWNER" = "$ROLE" ]; then
     die "'$DOMAIN' is $(state_here | sed 's/^$/not defined/') here and the other host is unreachable; the location record says it lives here: run 'nomad start'"
@@ -481,7 +524,7 @@ cmd_migrate() {
   if [ "$viewer" = 1 ]; then
     ssh "${SSH_OPTS[@]}" "$route" "$PEER_NOMAD viewer" || warn "could not open the viewer on the other host"
     # SPICE accepts one client at a time: a second viewer would kick the one on the new host
-    [ "${VIEWER_SOURCE:-0}" != 1 ] || open_viewer "qemu+ssh://$route/system"
+    [ "${VIEWER_SOURCE:-0}" != 1 ] || open_viewer_smart "qemu+ssh://$route/system"
   fi
   log "Migration done: '$DOMAIN' now runs on the other host"
   printf '\a'

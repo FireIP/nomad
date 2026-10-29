@@ -173,6 +173,14 @@ class NomadTests(unittest.TestCase):
         if event:
             self.assertEqual(a["EVENT"], event)
 
+    def wait_for_file(self, path, timeout=3):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if path.exists():
+                return
+            time.sleep(0.02)
+        self.fail(f"timed out waiting for {path}")
+
     def test_where_infers_and_syncs_then_start_uses_installed_symlink(self):
         self.state("a", "shut off")
         self.run_nomad("a", "where")
@@ -217,6 +225,71 @@ class NomadTests(unittest.TestCase):
         self.run_nomad("a", "start", "--yes")
         self.assert_state("a", "running")
         self.assertEqual(self.record("a")["OWNER"], "strong")
+
+    def test_smart_viewer_forces_standalone_virt_viewer(self):
+        self.state("a", "running")
+        runtime = self.root / "a/runtime"
+        runtime.mkdir(parents=True)
+        cfg = self.root / "a/home/.config/nomad/config"
+        cfg.write_text(
+            'ROLE=strong\nROUTES="ethernet wifi"\nAUTO_INFLATE=0\n'
+            'VIEWER=1\nVIEWER_CMD=virt-manager\n'
+            'SMART_MONITORS_MODE=all_minus_n\nSMART_MONITORS_MINUS=1\nSMART_MONITORS_FIXED=1\n'
+        )
+        manager_marker = self.root / "virt-manager.used"
+        viewer_log = self.root / "virt-viewer.log"
+        (self.bin / "virt-manager").write_text(
+            "#!/usr/bin/env bash\n"
+            f"touch {manager_marker}\n"
+        )
+        (self.bin / "virt-manager").chmod(0o755)
+        (self.bin / "virt-viewer").write_text(
+            "#!/usr/bin/env bash\n"
+            f"echo \"$*\" > {viewer_log}\n"
+            f"echo \"$XDG_CONFIG_HOME\" > {viewer_log}.cfg\n"
+        )
+        (self.bin / "virt-viewer").chmod(0o755)
+
+        self.run_nomad(
+            "a", "viewer",
+            DISPLAY=":0",
+            XDG_RUNTIME_DIR=str(runtime),
+            NOMAD_CONNECTED_MONITORS="3",
+        )
+        self.wait_for_file(viewer_log)
+        self.assertFalse(manager_marker.exists())
+        self.assertIn("--full-screen", viewer_log.read_text())
+        cfg_home = Path((viewer_log.with_suffix(".log.cfg")).read_text().strip())
+        settings = (cfg_home / "virt-viewer/settings").read_text()
+        self.assertIn("monitor-mapping=1:1;2:2", settings)
+
+    def test_smart_viewer_fixed_count_uses_requested_target(self):
+        self.state("a", "running")
+        runtime = self.root / "a/runtime"
+        runtime.mkdir(parents=True)
+        cfg = self.root / "a/home/.config/nomad/config"
+        cfg.write_text(
+            'ROLE=strong\nROUTES="ethernet wifi"\nAUTO_INFLATE=0\n'
+            'VIEWER=1\nVIEWER_CMD=virt-viewer\n'
+            'SMART_MONITORS_MODE=fixed_count\nSMART_MONITORS_FIXED=3\nSMART_MONITORS_MINUS=1\n'
+        )
+        viewer_log = self.root / "virt-viewer-fixed.log"
+        (self.bin / "virt-viewer").write_text(
+            "#!/usr/bin/env bash\n"
+            f"echo \"$XDG_CONFIG_HOME\" > {viewer_log}\n"
+        )
+        (self.bin / "virt-viewer").chmod(0o755)
+
+        self.run_nomad(
+            "a", "viewer",
+            DISPLAY=":0",
+            XDG_RUNTIME_DIR=str(runtime),
+            NOMAD_CONNECTED_MONITORS="5",
+        )
+        self.wait_for_file(viewer_log)
+        cfg_home = Path(viewer_log.read_text().strip())
+        settings = (cfg_home / "virt-viewer/settings").read_text()
+        self.assertIn("monitor-mapping=1:1;2:2;3:3", settings)
 
     def test_migration_both_directions_updates_owner_and_saves_source_xml(self):
         self.state("a", "running")

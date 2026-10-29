@@ -84,6 +84,36 @@ alert() {
   command -v notify-send >/dev/null 2>&1 && notify-send -u critical "nomad" "$*" >/dev/null 2>&1 || true
 }
 
+# Best-effort count of currently connected host displays.
+# NOMAD_CONNECTED_MONITORS overrides detection (used by tests and manual overrides).
+connected_monitors() {
+  if [[ "${NOMAD_CONNECTED_MONITORS:-}" =~ ^[0-9]+$ ]] && [ "${NOMAD_CONNECTED_MONITORS:-0}" -ge 1 ]; then
+    echo "$NOMAD_CONNECTED_MONITORS"; return 0
+  fi
+  local n out
+  if command -v xrandr >/dev/null 2>&1; then
+    out="$(xrandr --listactivemonitors 2>/dev/null || true)"
+    n="$(awk '/^Monitors:/{print $2}' <<<"$out")"
+    if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ]; then echo "$n"; return 0; fi
+    out="$(xrandr --query 2>/dev/null || true)"
+    n="$(grep -c ' connected' <<<"$out" || true)"
+    if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ]; then echo "$n"; return 0; fi
+  fi
+  if command -v kscreen-doctor >/dev/null 2>&1; then
+    out="$(kscreen-doctor -o 2>/dev/null || true)"
+    n="$(awk '
+      /^Output:/ {if (seen && conn && en) c++; seen=1; conn=0; en=0; next}
+      /^[[:space:]]*connected$/ {conn=1}
+      /^[[:space:]]*enabled$/ {en=1}
+      END {if (seen && conn && en) c++; print c+0}
+    ' <<<"$out")"
+    if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ]; then echo "$n"; return 0; fi
+    n="$(grep -c '^Output:' <<<"$out" || true)"
+    if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ]; then echo "$n"; return 0; fi
+  fi
+  echo 1
+}
+
 # Turns `virsh domjobinfo` text (stdin) into key=value lines in bytes.
 parse_job() {
   awk '
@@ -167,6 +197,20 @@ run_with_progress() {
 # VIEWER_CMD: virt-viewer (default) or virt-manager.
 open_viewer() {
   local uri="${1:-qemu:///system}" cmd="${VIEWER_CMD:-virt-viewer}" rt sock
+  local target="${NOMAD_SMART_MONITORS_TARGET:-}" smart_mode="${NOMAD_SMART_MONITORS_MODE:-off}"
+  local cfg_root mapping i
+  local -a cmd_argv
+  local -a run_argv=()
+
+  if [ -n "$target" ] && [ "$cmd" != "virt-viewer" ]; then
+    if command -v virt-viewer >/dev/null 2>&1; then
+      warn "smart monitors need standalone virt-viewer; forcing it (was $cmd)"
+      cmd=virt-viewer
+    else
+      warn "smart monitors requested but virt-viewer is missing; opening $cmd without smart controls"
+      target=""
+    fi
+  fi
   command -v "$cmd" >/dev/null 2>&1 || { warn "$cmd not installed; skipping the viewer"; return 0; }
   rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
   if [ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
@@ -176,9 +220,26 @@ open_viewer() {
     else warn "no graphical session found; skipping the viewer"; return 0; fi
   fi
   case "$cmd" in
-    virt-manager) set -- "$cmd" --connect "$uri" --show-domain-console "$DOMAIN" ;;
-    *) set -- "$cmd" --connect "$uri" --reconnect "$DOMAIN" ;;
+    virt-manager) cmd_argv=("$cmd" --connect "$uri" --show-domain-console "$DOMAIN") ;;
+    *) cmd_argv=("$cmd" --connect "$uri" --reconnect "$DOMAIN") ;;
   esac
-  setsid "$@" >/dev/null 2>&1 </dev/null &
-  log "Opened $cmd on $uri"
+
+  if [ -n "$target" ] && [ "$cmd" = "virt-viewer" ]; then
+    cfg_root="${rt%/}/nomad-virt-viewer-smart"
+    mkdir -p "$cfg_root/virt-viewer"
+    mapping=""
+    for ((i = 1; i <= target; i++)); do
+      mapping+="${mapping:+;}${i}:${i}"
+    done
+    {
+      printf "[fallback]\n"
+      printf "monitor-mapping=%s\n" "$mapping"
+    } > "$cfg_root/virt-viewer/settings"
+    run_argv=(env XDG_CONFIG_HOME="$cfg_root")
+    cmd_argv=("$cmd" --full-screen --connect "$uri" --reconnect "$DOMAIN")
+    log "Opened smart viewer ($smart_mode target=$target, mapping=$mapping) on $uri"
+  else
+    log "Opened $cmd on $uri"
+  fi
+  setsid "${run_argv[@]}" "${cmd_argv[@]}" >/dev/null 2>&1 </dev/null &
 }
